@@ -18,17 +18,16 @@ redis_client = redis.Redis.from_url(
 def pet_status_key(pet_idx: int) -> str:
     return f"pet_status:{pet_idx}"
 
+def current_generation(pet_idx: int) -> str:
+    return f"generation:{str(pet_idx)}"
+
 # ------------------------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------------------------
 
 CONFIG_PATH = os.environ.get("PET_CONFIG_PATH", "config/server/script/config.yaml")
-
-with open(CONFIG_PATH, "r") as f:
-    _cfg = yaml.safe_load(f)
-
-NUM_PET_SERVER = int(_cfg["num_pet_server"])
-PET_SERVER_START_PORT = int(_cfg["pet_server_start_port"])
+NUM_PET_SERVER = int(os.environ.get("NUM_PET_SERVER", 4))
+PET_SERVER_START_PORT = int(os.environ.get("PET_SERVER_START_PORT", 8765))
 
 # Track Popen objects for each pet_idx
 pet_servers = [None] * NUM_PET_SERVER
@@ -50,7 +49,7 @@ def start_pet_servers():
     time.sleep(3)
     for pet_idx in range(NUM_PET_SERVER):
         redis_client.set(pet_status_key(pet_idx), "OK")
-
+        redis_client.set(current_generation(pet_idx), 0)
     print(
         "[arbiter] Started pet-servers:",
         [(pet_idx, PET_SERVER_START_PORT + pet_idx, p.pid) for pet_idx, p in enumerate(pet_servers)],
@@ -97,6 +96,9 @@ def restart_single_pet_server(pet_idx: int):
     port = PET_SERVER_START_PORT + pet_idx
     new_p = subprocess.Popen(["pet-server", "-p", str(port)])
     pet_servers[pet_idx] = new_p
+    
+    generation = int(redis_client.get(current_generation(pet_idx)))
+    redis_client.set(current_generation(pet_idx), generation + 1)
     time.sleep(3.0)
     # Mark as OK again
     redis_client.set(pet_status_key(pet_idx), "OK")
