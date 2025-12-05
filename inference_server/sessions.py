@@ -42,9 +42,9 @@ class SessionManager:
         return f"session:{session_id}"
 
     @staticmethod
-    def current_generation(session_id: str) -> str:
+    def current_generation(pet_idx: str) -> str:
         """Generate Redis key for a given session ID."""
-        return f"generation:{session_id}"
+        return f"generation:{pet_idx}"
 
     @staticmethod
     def handler(signum, frame):
@@ -58,6 +58,10 @@ class SessionManager:
     @staticmethod
     def pet_status_key(pet_idx: int) -> str:
         return f"pet_status:{pet_idx}"
+
+    def archive_session(self, sess: Session):
+        """Store session data in Redis for archival purposes."""
+        self.redis_client.rpush("archived_sessions", json.dumps(asdict(sess)))
 
     def pet_status(self) -> bool:
         """Check if all pet-servers are in OK state."""
@@ -118,9 +122,9 @@ class SessionManager:
         """Save session to Redis."""
         self.redis_client.set(self.session_key(sess.session_id), json.dumps(asdict(sess)))
 
-    def get_generation(self, session_id: str) -> int:
+    def get_generation(self, pet_idx: str) -> int:
         """Load session from Redis by session ID."""
-        data = self.redis_client.get(self.current_generation(session_id))
+        data = self.redis_client.get(self.current_generation(pet_idx))
         if not data:
             raise KeyError("Unknown session_id")
         return int(data)
@@ -131,7 +135,7 @@ class SessionManager:
 
     def check_session(self, sess: Session):
         """If sess.generation is outdated, replay the tactics to recreate cache states on current pet-server generation."""
-        current_generation = self.get_generation(sess.session_id)
+        current_generation = self.get_generation(sess.pet_idx)
         if sess.generation == current_generation:
             return  # No need to replay
 
@@ -159,16 +163,20 @@ class SessionManager:
         self.ensure_pet_ok(pet_idx, timeout=self.timeout_kill_pet)
         lock = self.acquire_pet_lock(pet_idx, timeout=self.max_timeout + 5)
         try:
+            sess.generation = self.get_generation(sess.pet_idx)
             self.check_session(sess)
             worker = self.pytanques[pet_idx]
 
             signal.signal(signal.SIGALRM, self.handler)
             signal.alarm(self.timeout_start_thm)
 
-            state = worker.get_state_at_pos(filepath, line, character, timeout=self.timeout_start_thm)
+            state = worker.get_state_at_pos(filepath, line, character)
             goals = worker.goals(state)
             signal.alarm(0)  # Disable alarm
 
+            if sess.filepath and sess.tactics:
+                # archive session if non trivial previous session
+                self.archive_session(sess)
             sess.filepath = filepath
             sess.line = line
             sess.character = character
