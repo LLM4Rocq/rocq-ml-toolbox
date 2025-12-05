@@ -1,8 +1,3 @@
-import json
-import os
-import time
-import threading
-
 from pytanque import State
 from flask import Flask, request, jsonify
 
@@ -12,7 +7,7 @@ app = Flask(__name__)
 
 session_manager = SessionManager(
     pet_server_start_port=8765,
-    num_pet_server=8,
+    num_pet_server=4,
     timeout_start_thm=30,
     timeout_run=10
 )
@@ -46,7 +41,6 @@ def start_thm():
 
     Expects:
         - session_id (str): the session ID assigned from /login.
-        - thm_name (str): the name of the theorem to start.
         - filepath (str): the file path where the theorem is located.
         - line (int): the line number of the theorem.
         - character (int): the character position of the theorem.
