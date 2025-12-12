@@ -1,4 +1,4 @@
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Any
 
 import requests
 
@@ -59,9 +59,12 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
 
-if __name__ == '__main__':
-    client = PetClient('http://127.0.0.1:5000')
-    state, goals = client.start_thm('foo')
-    print(goals)
-    state, goals = client.run_tac(state, 'intros n.')
-    print(goals)
+    def get_session(self) -> Dict[str, Any]:
+        url = f"{self.base_url}/get_session"
+        payload = {'session_id': self.session_id}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            output = response.json()
+            return output
+        else:
+            raise ClientError(response.status_code, response.text)
