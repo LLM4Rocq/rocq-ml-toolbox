@@ -1,89 +1,154 @@
-from pytanque import State
-from flask import Flask, request, jsonify
+import os
+import traceback
 
-from .sessions import SessionManager
+from flask import Flask, request, jsonify, current_app
+from pytanque import State, PetanqueError
+
+from .sessions import SessionManager, UnresponsiveError
 
 app = Flask(__name__)
 
+NUM_PET_SERVER = int(os.environ.get("NUM_PET_SERVER", 8))
+PET_SERVER_START_PORT = int(os.environ.get("PET_SERVER_START_PORT", 8765))
+
 session_manager = SessionManager(
-    pet_server_start_port=8765,
-    num_pet_server=4,
-    timeout_start_thm=30,
-    timeout_run=10
+    pet_server_start_port=PET_SERVER_START_PORT,
+    num_pet_server=NUM_PET_SERVER,
+    timeout_start_thm=90,
+    timeout_run=60,
 )
 
-@app.route('/health', methods=['GET'])
+def _traceback_str(e: Exception) -> str | None:
+    return "".join(traceback.format_exception(type(e), e, e.__traceback__))
+
+def _json_error(error_code: str, message: str, status: int, exc: Exception | None = None):
+    payload = {"error": error_code, "message": message}
+    if exc is not None:
+        tb = _traceback_str(exc)
+        if tb is not None:
+            payload["traceback"] = tb
+    return jsonify(payload), status
+
+# -------------------------------------------------------------------------
+# Health
+# -------------------------------------------------------------------------
+
+@app.route("/health", methods=["GET"])
 def health():
     if session_manager.pet_status():
         return "OK", 200
-    else:
-        return "Pet servers not ready", 500
+    return "Pet servers not ready", 503
 
-@app.route('/login', methods=['GET'])
+# -------------------------------------------------------------------------
+# Error handlers
+# -------------------------------------------------------------------------
+
+@app.errorhandler(PetanqueError)
+def handle_petanque_error(e: PetanqueError):
+    return _json_error("petanque_error", str(e), 400, e)
+
+@app.errorhandler(UnresponsiveError)
+def handle_unresponsive_error(e: UnresponsiveError):
+    return _json_error("unresponsive", str(e), 503, e)
+
+@app.errorhandler(KeyError)
+def handle_key_error(e: KeyError):
+    return _json_error("not_found", str(e), 404, e)
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(e: Exception):
+    current_app.logger.exception("Unhandled exception in request")
+    return _json_error("internal_error", f"internal server error: {e}", 500, e)
+
+
+# -------------------------------------------------------------------------
+# Utility: input validation
+# -------------------------------------------------------------------------
+
+def require_json_fields(data, required):
+    missing = [k for k in required if k not in data]
+    if missing:
+        return (
+            jsonify(
+                {
+                    "error": "bad_request",
+                    "message": "missing required fields",
+                    "missing": missing,
+                }
+            ),
+            400,
+        )
+    return None
+
+# -------------------------------------------------------------------------
+# Routes
+# -------------------------------------------------------------------------
+
+@app.route("/login", methods=["GET"])
 def login():
     """
     Return a session object with assigned pet-server index and unique session ID.
-
-    Returns:
-            - status_code
-            - output: the assigned session ID
     """
-    try:
-        sess = session_manager.create_session()
-        return jsonify({"session_id": sess.session_id}), 200
-    except Exception as e:
-        return str(e), 500
+    sess = session_manager.create_session()
+    return jsonify({"session_id": sess.session_id}), 200
 
-@app.route('/start_thm', methods=['POST'])
+
+@app.route("/start_thm", methods=["POST"])
 def start_thm():
     """
-    Start a theorem
+    Start a theorem.
 
-    Expects:
-        - session_id (str): the session ID assigned from /login.
-        - filepath (str): the file path where the theorem is located.
-        - line (int): the line number of the theorem.
-        - character (int): the character position of the theorem.
-
-    Returns:
-            - status_code
-            - output: A dictionary containing:
-                - state: The initial proof state (in JSON format)
-                - goals: A list of pretty-printed goals
+    Expects JSON:
+        - session_id (str)
+        - filepath (str)
+        - line (int)
+        - character (int)
     """
-    try:
-        data = request.get_json()
-        state, goals = session_manager.start_thm(**data)
-        goals_json = [goal.to_json() for goal in goals]
-        output = {"state": state.to_json(), "goals": goals_json}
-        return jsonify(output), 200
-    except Exception as e:
-        return str(e), 500
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["session_id", "filepath", "line", "character"])
+    if err is not None:
+        return err
 
-@app.route('/run', methods=['POST'])
+    state, goals = session_manager.start_thm(
+        session_id=data["session_id"],
+        filepath=data["filepath"],
+        line=data["line"],
+        character=data["character"],
+    )
+    goals_json = [goal.to_json() for goal in goals]
+    output = {"state": state.to_json(), "goals": goals_json}
+    return jsonify(output), 200
+
+
+@app.route("/run", methods=["POST"])
 def run():
     """
     Execute a given tactic on the current proof state.
 
-    Expects:
-        - state: the current proof state.
-        - tactic: the tactic command to execute.
-        - session_id: the session ID assigned from /login.
-
-    Returns:
-            - status_code
-            - output:
-                - state: new proof state
-                - goals: goals
+    Expects JSON:
+        - state: the current proof state (JSON from previous response)
+        - tactic: tactic command (str)
+        - session_id: session ID from /login
     """
-    try:
-        data = request.get_json()        
-        current_state = State.from_json(data['state'])
-        tactic = data['tactic']
-        session_id = data['session_id']
-        state, goals = session_manager.run(session_id, current_state, tactic)
-        goals_json = [goal.to_json() for goal in goals]
-        output = {"state": state.to_json(), "goals": goals_json}
-        return jsonify(output), 200
-    except Exception as e:
-        return str(e), 500
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["state", "tactic", "session_id"])
+    if err is not None:
+        return err
+
+    current_state = State.from_json(data["state"])
+    tactic = data["tactic"]
+    session_id = data["session_id"]
+
+    state, goals = session_manager.run(session_id, current_state, tactic)
+    goals_json = [goal.to_json() for goal in goals]
+    output = {"state": state.to_json(), "goals": goals_json}
+    return jsonify(output), 200
+
+@app.route("/get_session", methods=["POST"])
+def get_session():
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["session_id"])
+    if err is not None:
+        return err
+    session_id = data["session_id"]
+    return jsonify(session_manager.get_session(session_id).to_dict()), 200
