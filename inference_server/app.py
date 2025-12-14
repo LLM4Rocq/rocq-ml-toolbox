@@ -1,5 +1,6 @@
 import os
 import traceback
+import logging
 
 from flask import Flask, request, jsonify, current_app
 from pytanque import State, PetanqueError
@@ -8,15 +9,24 @@ from .sessions import SessionManager, UnresponsiveError
 
 app = Flask(__name__)
 
-NUM_PET_SERVER = int(os.environ.get("NUM_PET_SERVER", 8))
+NUM_PET_SERVER = int(os.environ.get("NUM_PET_SERVER", 4))
 PET_SERVER_START_PORT = int(os.environ.get("PET_SERVER_START_PORT", 8765))
 
 session_manager = SessionManager(
     pet_server_start_port=PET_SERVER_START_PORT,
     num_pet_server=NUM_PET_SERVER,
-    timeout_start_thm=90,
+    timeout_start_thm=120,
     timeout_run=60,
 )
+
+gunicorn_error_logger = logging.getLogger("gunicorn.error")
+if gunicorn_error_logger.handlers:
+    app.logger.handlers = gunicorn_error_logger.handlers
+    app.logger.setLevel(gunicorn_error_logger.level)
+    app.logger.propagate = False
+
+    logging.getLogger("werkzeug").handlers = gunicorn_error_logger.handlers
+    logging.getLogger("werkzeug").setLevel(gunicorn_error_logger.level)
 
 def _traceback_str(e: Exception) -> str | None:
     return "".join(traceback.format_exception(type(e), e, e.__traceback__))
@@ -45,19 +55,22 @@ def health():
 
 @app.errorhandler(PetanqueError)
 def handle_petanque_error(e: PetanqueError):
+    current_app.logger.error("PetanqueError", exc_info=e)
     return _json_error("petanque_error", str(e), 400, e)
 
 @app.errorhandler(UnresponsiveError)
 def handle_unresponsive_error(e: UnresponsiveError):
+    current_app.logger.error("UnresponsiveError", exc_info=e)
     return _json_error("unresponsive", str(e), 503, e)
 
 @app.errorhandler(KeyError)
 def handle_key_error(e: KeyError):
+    current_app.logger.error("KeyError", exc_info=e)
     return _json_error("not_found", str(e), 404, e)
 
 @app.errorhandler(Exception)
 def handle_unexpected_error(e: Exception):
-    current_app.logger.exception("Unhandled exception in request")
+    current_app.logger.error("Unhandled exception in request", exc_info=e)
     return _json_error("internal_error", f"internal server error: {e}", 500, e)
 
 
@@ -105,7 +118,7 @@ def start_thm():
         - character (int)
     """
     data = request.get_json(force=True, silent=False)
-    err = require_json_fields(data, ["session_id", "filepath", "line", "character"])
+    err = require_json_fields(data, ["session_id", "filepath", "line", "character", "failure"])
     if err is not None:
         return err
 
@@ -114,6 +127,7 @@ def start_thm():
         filepath=data["filepath"],
         line=data["line"],
         character=data["character"],
+        failure=data['failure']
     )
     goals_json = [goal.to_json() for goal in goals]
     output = {"state": state.to_json(), "goals": goals_json}
@@ -131,15 +145,16 @@ def run():
         - session_id: session ID from /login
     """
     data = request.get_json(force=True, silent=False)
-    err = require_json_fields(data, ["state", "tactic", "session_id"])
+    err = require_json_fields(data, ["state", "tactic", "session_id", "failure"])
     if err is not None:
         return err
-
-    current_state = State.from_json(data["state"])
-    tactic = data["tactic"]
-    session_id = data["session_id"]
-
-    state, goals = session_manager.run(session_id, current_state, tactic)
+        
+    state, goals = session_manager.run(
+        session_id=data["session_id"],
+        state=State.from_json(data["state"]),
+        tactic=data["tactic"],
+        failure=data["failure"]
+    )
     goals_json = [goal.to_json() for goal in goals]
     output = {"state": state.to_json(), "goals": goals_json}
     return jsonify(output), 200
