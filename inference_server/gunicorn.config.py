@@ -14,7 +14,7 @@ from inference_server.redis_keys import monitor_epoch_key, pet_status_key, gener
 # Configuration
 # ------------------------------------------------------------------------------
 
-NUM_PET_SERVER = int(os.environ.get("NUM_PET_SERVER", 8))
+NUM_PET_SERVER = int(os.environ.get("NUM_PET_SERVER", 4))
 PET_SERVER_START_PORT = int(os.environ.get("PET_SERVER_START_PORT", 8765))
 # Maximum allowed ram usage in MB per pet-server process.
 MAX_RAM_PER_PET = int(os.environ.get("MAX_RAM_PER_PET", 3072))
