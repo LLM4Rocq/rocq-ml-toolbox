@@ -4,7 +4,7 @@ import subprocess
 import time
 import sys
 from pathlib import Path
-import signal
+import psutil
 
 import pytest
 import requests
@@ -72,14 +72,21 @@ def _wait_until_ready(url: str, proc: subprocess.Popen | None, timeout_s: float 
 
     raise TimeoutError(f"Server not ready at {url}. Last error: {last_err!r}")
 
+def kill_all_proc(proc_name):
+    for proc in psutil.process_iter():
+        if proc.name() == proc_name:
+            proc.kill()
+    time.sleep(1)
 
 def _start_gunicorn(bind_host: str, bind_port: int) -> subprocess.Popen:
+    kill_all_proc('gunicorn')
+    kill_all_proc('pet-server')
     cmd = [
         "gunicorn",
-        "-w", "17",
+        "-w", "9",
         "-b", f"{bind_host}:{bind_port}",
         "inference_server.app:app",
-        "-t", "90",
+        "-t", "600",
         "-c", "inference_server/gunicorn.config.py",
         "--error-logfile", "-",
         "--log-level", "warning",
@@ -94,16 +101,6 @@ def _start_gunicorn(bind_host: str, bind_port: int) -> subprocess.Popen:
         preexec_fn=os.setsid,
         text=True,
     )
-
-
-def pytest_runtest_setup(item):
-    # If using pytest-xdist, avoid running the stress test on every worker.
-    # Parallelism should come from --stress-workers (ProcessPoolExecutor) like your script.
-    if "stress" in item.keywords:
-        workerinput = getattr(item.config, "workerinput", None)
-        if workerinput is not None:
-            pytest.skip("stress tests run only on the master process; use --stress-workers for parallelism.")
-
 
 @pytest.fixture(scope="session")
 def server_url(pytestconfig, request) -> str:
@@ -127,10 +124,11 @@ def server_url(pytestconfig, request) -> str:
         yield url
     finally:
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
-            proc.wait(timeout=10)
+            proc.terminate()
+            proc.wait(timeout=2)
         except Exception:
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
+                proc.kill()
+                proc.wait(timeout=2)
             except Exception:
                 pass
