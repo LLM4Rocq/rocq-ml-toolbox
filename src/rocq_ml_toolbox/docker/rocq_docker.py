@@ -3,7 +3,7 @@
 import os
 import time, socket
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 import re
 import shlex
 import sys
@@ -219,7 +219,13 @@ class RocqDocker:
         log = self.exec_cmd("sh -lc 'tail -n +200 /tmp/gunicorn-error.log || true'")
         raise RuntimeError(f"pet-server failed to start on port {port}.\n{log}")
 
-    def extract_opam_path(self, package_name: str, info_path: Dict[str, str]):
+    def list_opam_folder(self) -> List[str]:
+        "Extract all opam folder"
+        user_contrib = os.path.join(self.opam_env_path, "lib/coq/user-contrib/")
+        subfiles = self.exec_cmd(f"ls -1 {user_contrib}").splitlines()
+        return subfiles
+
+    def extract_opam_path(self, package_name: str, info_path: Dict[str, str]={}):
         """Resolve the OPAM installation path for a package."""
         opam_show = self.exec_cmd(f"opam show {package_name}")
         match = re.search(r'"logpath:([A-Za-z0-9_.-]+)"', opam_show)
@@ -228,7 +234,7 @@ class RocqDocker:
             return info_path[package_name], opam_show
         return match.group(1), opam_show
 
-    def extract_files(self, package_name: str, info_path: Dict[str, str]) -> Dict[str, Any]:
+    def extract_files(self, package_name: str, info_path: Dict[str, str]={}) -> Dict[str, Any]:
         """List `.v` files shipped with an installed package."""
         fqn, opam_show = self.extract_opam_path(package_name, info_path)
         user_contrib_path = os.path.join(self.opam_env_path, "lib/coq/user-contrib/")
