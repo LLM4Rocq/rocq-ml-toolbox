@@ -11,8 +11,8 @@ from datasets import load_dataset
 import redis
 from tqdm import tqdm
 
-from inference_server.client import PetClient
-from inference_server.redis_keys import pet_status_key, PetStatus
+from src.rocq_ml_toolbox.inference.client import PetClient
+from src.rocq_ml_toolbox.inference.redis_keys import pet_status_key, PetStatus
 
 redis_client = redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"))
 

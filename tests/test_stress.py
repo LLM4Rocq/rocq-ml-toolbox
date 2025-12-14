@@ -11,8 +11,8 @@ import redis
 import pytest
 from filelock import FileLock
 
-from inference_server.client import PetClient
-from inference_server.redis_keys import pet_status_key, PetStatus
+from src.rocq_ml_toolbox.inference.client import PetClient
+from src.rocq_ml_toolbox.inference.redis_keys import pet_status_key, PetStatus
 
 
 MC_DIR = os.environ.get("MC_DIR", "stress_test_light/source")
@@ -40,19 +40,19 @@ def try_proof_kill(entry, server_url: str) -> bool:
 def _cache_paths(n: int) -> tuple[Path, FileLock]:
     cache = Path(__file__).with_name(f".crrracq_subset_balance_n{n}.json")
     lock = FileLock(str(cache) + ".lock")
-    return cache, lock
+    return cache, lock, '.crrracq_full.json'
 
 def _cache_paths_valid(n: int) -> tuple[Path, FileLock]:
     cache = Path(__file__).with_name(f".crrracq_subset_valid_n{n}.json")
     lock = FileLock(str(cache) + ".lock")
-    return cache, lock
+    return cache, lock, '.crrracq_full.json'
 
 def _load_subset_balanced(n: int):
     """
     Select n entries, balanced between SUCCESS and non-SUCCESS, with early stopping.
     Cached to disk to avoid rescanning the dataset on every pytest run.
     """
-    cache, lock = _cache_paths(n)
+    cache, lock, full_ds = _cache_paths(n)
 
     with lock:
         if cache.exists():
@@ -96,7 +96,7 @@ def _load_subset_valid(n: int):
     Select n entries.
     Cached to disk to avoid rescanning the dataset on every pytest run.
     """
-    cache, lock = _cache_paths_valid(n)
+    cache, lock, full_ds = _cache_paths_valid(n)
 
     with lock:
         if cache.exists():

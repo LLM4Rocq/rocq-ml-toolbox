@@ -1,7 +1,7 @@
 # tests/test_api.py
 import pytest
 import requests
-from inference_server.client import ClientError, PetClient
+from src.rocq_ml_toolbox.inference.client import ClientError, PetClient
 
 @pytest.mark.api
 def test_health_check(server_url):
