@@ -5,23 +5,33 @@ import time, socket
 from pathlib import Path
 from typing import Dict, Any
 import re
+import shlex
+import sys
+import signal
 
-import docker, shlex, sys
+import requests
+import docker
+from docker.models.containers import Container
 
-from src.config.opam_config import OpamConfig
-from .parser import Source
+from .config import OpamConfig
+from ..parser.parser import Source
 
-class OpamDocker:
+class RocqDocker:
     """Wraps Docker interactions for extracting data from an OPAM switch."""
 
-    def __init__(self, config:OpamConfig, build=False, kill_clone=False):
+    @staticmethod
+    def handler(signum, frame):
+        """Signal handler for timeouts."""
+        raise TimeoutError("Operation timed out")
+
+    def __init__(self, config:OpamConfig, redis_image: str= "redis:latest", redis_port:int = 6379, rebuild=False, kill_clone=False):
         """Start or reuse a container built from the given OPAM configuration."""
         super().__init__()
         self.client = docker.from_env()
+        self.config = config
+        self._build_image(config, rebuild=rebuild)
         image_name = config.name + ':' + config.tag
-        if build:
-            image_name = config.base_image
-        
+
         if kill_clone:
             try:
                 for c in self.client.containers.list(all=True, filters={"ancestor": image_name}):
@@ -33,6 +43,16 @@ class OpamDocker:
                             pass
             except Exception as e:
                 raise RuntimeError(f"Failed to kill clones for image {image_name}: {e}")
+            try:
+                for c in self.client.containers.list(all=True, filters={"ancestor": redis_image}):
+                    c.reload()
+                    if c.status == "running":
+                        try:
+                            c.kill()
+                        except Exception:
+                            pass
+            except Exception as e:
+                raise RuntimeError(f"Failed to kill clones for image {redis_image}: {e}")
         self.container = self.client.containers.run(
             image_name,
             detach=True,
@@ -42,8 +62,42 @@ class OpamDocker:
             command=["sleep", "infinity"],
             network_mode="host",
         )
+        self.redis_container = self.client.containers.run(
+            redis_image,
+            detach=True,
+            ports={"6379/tcp": ("127.0.0.1", redis_port)},
+            restart_policy={"Name": "unless-stopped"}
+        )
         self.opam_env_path = config.opam_env_path
+    
+    def _build_image(self, config:OpamConfig, rebuild=False, timeout_install=3600):
+        """Create a container image for the requested packages if needed."""
+        new_image_name = config.name + ":" + config.tag
+        filterred_images = self.client.images.list(filters={'reference': new_image_name})
+        if filterred_images and not rebuild:
+            print('Image already exists')
+            return
         
+        self.container = self.client.containers.run(
+            config.base_image,
+            detach=True,
+            tty=False,
+            stdin_open=False,
+            user=config.user,
+            command=["sleep", "infinity"],
+            network_mode="host",
+        )
+        try:
+            print('Build Image')
+            signal.signal(signal.SIGALRM, RocqDocker.handler)
+            signal.alarm(timeout_install)
+            self.install_project(" ".join(config.packages))
+            signal.alarm(0)
+        except Exception as e:
+            print(f"WARNING: {e}")
+        self.container.commit(config.name, config.tag)
+        self.kill_container(self.container)
+
     def _ensure_running(self):
         """Guarantee the container is running before issuing commands."""
         self.container.reload()
@@ -129,28 +183,40 @@ class OpamDocker:
             raise RuntimeError(f"cat failed with exit code {code}")
         return buf.decode(encoding, errors="replace")
 
-    def close(self):
-        """Stop and remove the underlying container."""
+    def kill_container(self, container: Container):
         try:
-            self.container.kill()
+            container.kill()
         finally:
-            self.container.remove(force=True)
+            container.remove(force=True)
 
-    def start_pet(self, port=8765, timeout=30):
+    def close(self):
+        """Stop and remove the underlying containers."""
+        self.kill_container(self.container)
+        self.kill_container(self.redis_container)
+
+    def start_inference_server(self, port=5000, workers=9, timeout=600, num_pet_server=4, pet_server_start_port=8765, max_ram_per_pet=3072):
         """Launch pet-server inside the container."""
         self.pet_port = port
-        self.exec_cmd(
-            "sh -lc 'eval $(opam env) && "
-            f"nohup pet-server -p {port} >/tmp/pet.log 2>&1 & echo $! >/tmp/pet.pid'"
-        )
+        cmd = f"""
+        eval "$(/home/rocq/miniconda/bin/conda shell.bash hook)"
+        conda activate rocq-ml
+        nohup rocq-ml-server -p {port} -w {workers} -t {timeout} \
+        --num-pet-server {num_pet_server} \
+        --pet-server-start-port {pet_server_start_port} \
+        --max-ram-per-pet {max_ram_per_pet} &
+        """
+
+        self.exec_cmd(["bash", "-lc", cmd])
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                resp = requests.get(f"http://127.0.0.1:{port}/health")
+                if resp.status_code == 200:
                     return
-            except OSError:
-                time.sleep(0.2)
-        log = self.exec_cmd("sh -lc 'tail -n +200 /tmp/pet.log || true'")
+            except Exception as e:
+                pass
+            time.sleep(0.1)
+        log = self.exec_cmd("sh -lc 'tail -n +200 /tmp/gunicorn-error.log || true'")
         raise RuntimeError(f"pet-server failed to start on port {port}.\n{log}")
 
     def extract_opam_path(self, package_name: str, info_path: Dict[str, str]):
