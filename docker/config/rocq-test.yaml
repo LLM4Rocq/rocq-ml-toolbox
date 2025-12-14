@@ -1,0 +1,8 @@
+name: theostos/rocq-metarocq
+output: export/output/rocq-metarocq
+tag: '9.0'
+packages:
+- rocq-metarocq
+base_image: theostos/rocq-server:9.0
+opam_env_path: /home/rocq/.opam/4.14.2+flambda
+user: rocq

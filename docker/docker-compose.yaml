@@ -1,0 +1,24 @@
+services:
+  coq-lsp:
+    image: theostos/coq-lsp:8.20
+    build:
+      context: ./coq-lsp
+
+  coq-server:
+    image: theostos/coq-server:8.20
+    build:
+      context: ./coq-server
+    depends_on:
+      - coq-lsp
+
+  rocq-lsp:
+    image: theostos/rocq-lsp:9.0
+    build:
+      context: ./rocq-lsp
+
+  rocq-server:
+    image: theostos/rocq-server:9.0
+    build:
+      context: ./rocq-server
+    depends_on:
+      - rocq-lsp
