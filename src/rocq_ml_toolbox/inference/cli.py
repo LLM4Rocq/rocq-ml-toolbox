@@ -19,8 +19,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("--max-ram-per-pet", type=int, default=3072, help="Maximum allowed ram usage in MB per pet-server process.")
     p.add_argument("--redis-url", type=str, default="redis://localhost:6379/0")
 
-    p.add_argument("--errorlog", default="gunicorn-error.log")
-    p.add_argument("--accesslog", default="gunicorn-access.log")
+    p.add_argument("--errorlog", default="/tmp/gunicorn-error.log")
+    p.add_argument("--accesslog", default="/tmp/gunicorn-access.log")
 
     p.add_argument("--app", default=DEFAULT_APP)
     p.add_argument("--config", default=DEFAULT_CONFIG)

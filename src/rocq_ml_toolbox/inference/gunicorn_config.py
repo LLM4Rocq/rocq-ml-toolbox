@@ -10,10 +10,6 @@ import redis
 
 from .redis_keys import monitor_epoch_key, pet_status_key, generation_key, cache_state_key, PetStatus
 
-# ------------------------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------------------------
-
 NUM_PET_SERVER = int(os.environ["NUM_PET_SERVER"])
 PET_SERVER_START_PORT = int(os.environ["PET_SERVER_START_PORT"])
 # Maximum allowed ram usage in MB per pet-server process.
@@ -21,16 +17,11 @@ MAX_RAM_PER_PET = int(os.environ["MAX_RAM_PER_PET"])
 REDIS_URL = os.environ["REDIS_URL"]
 
 # Redis client
-
 redis_client = redis.Redis.from_url(REDIS_URL)
 
 # Track Popen objects for each pet_idx
 pet_servers: List[Optional[subprocess.Popen]] = [None] * NUM_PET_SERVER
 monitor_threads = []
-
-# ------------------------------------------------------------------------------
-# Pet-server lifecycle management
-# ------------------------------------------------------------------------------
 
 def start_pet_servers():
     """Spawn one pet-server process per pet_idx on fixed ports."""
@@ -98,10 +89,6 @@ def restart_single_pet_server(pet_idx: int):
     redis_client.set(pet_status_key(pet_idx), PetStatus.OK)
     print(f"[arbiter] Restarted pet-server idx={pet_idx} on port {port}, pid={new_p.pid}", flush=True)
 
-# ------------------------------------------------------------------------------
-# Monitor Redis for restart requests
-# ------------------------------------------------------------------------------
-
 def monitor_redis_for_restarts(pet_idx: int, poll_interval: float = 0.02):
     """
     Monitor Redis pet_status:{idx} keys for RESTART_NEEDED, detect crashes,
@@ -162,10 +149,6 @@ def monitor_redis_for_restarts(pet_idx: int, poll_interval: float = 0.02):
         except Exception as e:
             print(f"[arbiter] Error in Redis restart monitor: {e}", flush=True)
             time.sleep(poll_interval)
-
-# ------------------------------------------------------------------------------
-# Gunicorn hooks
-# ------------------------------------------------------------------------------
 
 def on_starting(server):
     """Called just before the master process is initialized."""
