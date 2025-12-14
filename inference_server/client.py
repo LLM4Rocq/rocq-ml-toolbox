@@ -1,4 +1,4 @@
-from typing import Dict, Tuple, List, Any
+from typing import Dict, Tuple, List, Any, Optional
 
 import requests
 
@@ -33,12 +33,12 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
     
-    def start_thm(self, filepath: str, line: int, character: int) -> Tuple[State, Goals]:
+    def start_thm(self, filepath: str, line: int, character: int, failure: bool=False) -> Tuple[State, Goals]:
         """
         Start a theorem proving session for the theorem at the given index.
         """
         url = f"{self.base_url}/start_thm"
-        payload = {'session_id': self.session_id, 'filepath': filepath, 'line': line, 'character': character}
+        payload = {'session_id': self.session_id, 'filepath': filepath, 'line': line, 'character': character, 'failure': failure}
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             output = response.json()
@@ -46,12 +46,12 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
 
-    def run(self, state: State, tactic: str) -> Tuple[State, Goals]:
+    def run(self, state: State, tactic: str, failure: bool=False) -> Tuple[State, Goals]:
         """
         Execute a given tactic on the current proof state.
         """
         url = f"{self.base_url}/run"
-        payload = {'session_id': self.session_id, 'state': state, 'tactic': tactic}
+        payload = {'session_id': self.session_id, 'state': state, 'tactic': tactic, 'failure': failure}
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             output = response.json()
