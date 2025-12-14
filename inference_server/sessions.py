@@ -5,6 +5,7 @@ import os
 import json
 import uuid
 import signal
+import random
 
 from pytanque import Pytanque, State, Goal, PetanqueError
 
@@ -292,7 +293,10 @@ class SessionManager:
         self.redis_client.set(pet_status_key(pet_idx), PetStatus.RESTART_NEEDED)
         self._restart_worker(pet_idx)
 
-    def start_thm(self, session_id: str, filepath: str, line: int, character: int) -> Tuple[State, List[Goal]]:
+    def _failure_simulation(self):
+        raise UnresponsiveError("Forced failure (Debugging purpose).")
+
+    def start_thm(self, session_id: str, filepath: str, line: int, character: int, failure: bool=False) -> Tuple[State, List[Goal]]:
         """Start a theorem proving session for the theorem at the given position."""
         sess = self.get_session(session_id)
         pet_idx = sess.pet_idx
@@ -305,6 +309,8 @@ class SessionManager:
             sess.generation = self.get_generation(pet_idx)
             worker = self._get_worker(pet_idx)
 
+            if failure:
+                self._failure_simulation()
             signal.signal(signal.SIGALRM, SessionManager.handler)
             signal.alarm(self.timeout_start_thm)
 
@@ -338,7 +344,7 @@ class SessionManager:
                     # Lock might have expired; safe to ignore
                     pass
 
-    def run(self, session_id: str, state: State, tactic: str) -> Tuple[State, List[Goal]]:
+    def run(self, session_id: str, state: State, tactic: str, failure: bool=False) -> Tuple[State, List[Goal]]:
         """Execute a given tactic on the current proof state."""
         sess = self.get_session(session_id)
         pet_idx = sess.pet_idx
@@ -352,6 +358,8 @@ class SessionManager:
                 state = sess.mapping_state[state.hash] # update state, required in case of replay
             worker = self._get_worker(sess.pet_idx)
             
+            if failure:
+                self._failure_simulation()
             signal.signal(signal.SIGALRM, SessionManager.handler)
             signal.alarm(self.timeout_run)
             state = worker.run(state, tactic, verbose=False, timeout=self.timeout_run)
