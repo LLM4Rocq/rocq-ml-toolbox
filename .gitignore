@@ -5,8 +5,12 @@ __pycache__/
 
 # C extensions
 *.so
+
+# Temporary files
 tests/.*
 stress_test_light
+*.log
+
 # Distribution / packaging
 .Python
 build/
