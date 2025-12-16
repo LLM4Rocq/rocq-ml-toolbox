@@ -26,9 +26,8 @@ class PetClient:
         """
         self.base_url = base_url.rstrip("/")
         self.session_id: str = None
-        self._login()
 
-    def _login(self):
+    def connect(self):
         """
         Log in to the server to retrieve a load-balanced server index.
         """
@@ -139,7 +138,7 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
     
-    def toc(self, file: str, failure: bool=False, timeout: int=10) -> list[tuple[str, Any]]:
+    def toc(self, file: str, failure: bool=False, timeout: int=120) -> list[tuple[str, Any]]:
         """
         Get toc of a file.
         """
