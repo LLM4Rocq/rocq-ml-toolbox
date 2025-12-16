@@ -28,7 +28,7 @@ def try_proof_kill(entry, server_url: str) -> bool:
     client = PetClient(server_url)
     filepath = os.path.join(MC_DIR, entry['filepath'])
     try:
-        state = client.start_thm(filepath, entry['line'], entry['character'])
+        state = client.get_state_at_pos(filepath, entry['line'], entry['character'])
         for step in entry['proof_steps']:
             kill_all_proc('pet-server')
             state = client.run(state, step)
@@ -155,7 +155,7 @@ def try_proof(entry, server_url, retry=1, failure_rate=0.) -> bool:
 
     try:
         state = call_with_failover(
-            client.start_thm,
+            client.get_state_at_pos,
             filepath,
             entry["line"],
             entry["character"],
