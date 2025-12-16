@@ -10,7 +10,15 @@ import json
 import uuid
 import signal
 
-from pytanque import Pytanque, State, PetanqueError
+from pytanque import Pytanque, PetanqueError
+from pytanque.client import Params
+from pytanque.protocol import (
+    Response,
+    Opts,
+    State,
+    Goal,
+    Inspect
+)
 
 import redis
 from redis.lock import Lock
@@ -61,7 +69,7 @@ class Session:
     mapping_state: Dict[int, State]  # to map old states with new states in case of replay
 
     @classmethod
-    def from_dict(cls, raw: Dict[str, Any]) -> Session:
+    def from_json(cls, raw: Dict[str, Any]) -> Session:
         tactics = [(State.from_json(st_json), tac) for st_json, tac in raw.get("tactics", [])]
         mapping_state_raw = raw.get("mapping_state", {})
         mapping_state = {int(k): State.from_json(v_json) for k, v_json in mapping_state_raw.items()}
@@ -77,7 +85,7 @@ class Session:
             mapping_state=mapping_state,
         )
 
-    def to_dict(self) -> dict:
+    def to_json(self) -> dict:
         return {
             "session_id": self.session_id,
             "pet_idx": self.pet_idx,
@@ -113,7 +121,7 @@ class SessionManager:
         """Save session to Redis."""
         self.redis_client.set(
             session_key(sess.session_id),
-            json.dumps(sess.to_dict())
+            json.dumps(sess.to_json())
         )
 
     def get_session(self, session_id: str) -> Session:
@@ -122,7 +130,7 @@ class SessionManager:
         if not data:
             raise KeyError("Unknown session_id")
         raw = json.loads(data)
-        return Session.from_dict(raw)
+        return Session.from_json(raw)
 
     def get_generation(self, pet_idx: int) -> int:
         data = self.redis_client.get(generation_key(pet_idx))
@@ -321,7 +329,7 @@ class SessionManager:
         session_id: str,
         failure: bool,
         error_prefix: str,
-        state: Optional[dict]=None
+        state: Optional[State]=None
     ) -> Iterator[Tuple["Session", Pytanque, Lock, Optional[State]]]:
         sess = self.get_session(session_id)
         pet_idx = sess.pet_idx
@@ -330,20 +338,18 @@ class SessionManager:
             lock = self.acquire_pet_lock(pet_idx, timeout=self.timeout_ok + self.timeout_eps)
             self.ensure_pet_ok(pet_idx, timeout=self.timeout_ok)
             sess = self.get_session(session_id)
-            state_obj = None
             if state:
-                state_obj = State.from_json(state)
                 sess = self.check_session(sess, lock) # refresh after potential replay
 
-                if state_obj.hash in sess.mapping_state:
-                    state_obj = sess.mapping_state[state_obj.hash]
+                if state.hash in sess.mapping_state:
+                    state = sess.mapping_state[state.hash]
 
             worker = self._get_worker(sess.pet_idx)
 
             if failure:
                 self._failure_simulation()
 
-            yield sess, worker, lock, state_obj
+            yield sess, worker, lock, state
 
         except KeyError:
             raise
@@ -371,7 +377,7 @@ class SessionManager:
         failure: bool,
         error_prefix: str,
         op: Callable[[Session, Pytanque, Lock, Optional[State]], T],
-        state: Optional[dict] = None
+        state: Optional[State] = None
     ) -> T:
         with self._pet_ctx(
             session_id,
@@ -382,7 +388,7 @@ class SessionManager:
             with self._alarm(timeout):
                 return op(sess, worker, lock, new_state)
 
-    def get_state_at_pos(self, session_id: str, filepath: str, line: int, character: int, failure: bool=False, timeout=120) -> dict:
+    def get_state_at_pos(self, session_id: str, filepath: str, line: int, character: int, failure: bool=False, timeout=120) -> State:
         """Start a theorem proving session for the theorem at the given position. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state: Optional[State]):
             sess.generation = self.get_generation(sess.pet_idx)
@@ -399,8 +405,7 @@ class SessionManager:
             sess.mapping_state = {}
             self.save_session(sess)
 
-            return state.to_json()
-
+            return state
         return self._pet_call(
             session_id,
             timeout=timeout,
@@ -409,7 +414,7 @@ class SessionManager:
             op=op,
         )
 
-    def run(self, session_id: str, state: dict, tactic: str, failure: bool=False, timeout=60) -> dict:
+    def run(self, session_id: str, state: State, tactic: str, failure: bool=False, timeout=60) -> State:
         """Execute a given tactic on the current proof state. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
@@ -418,7 +423,7 @@ class SessionManager:
             sess.tactics.append((new_state, tactic))
             self.save_session(sess)
 
-            return new_state.to_json()
+            return new_state
 
         return self._pet_call(
             session_id,
@@ -429,12 +434,12 @@ class SessionManager:
             state=state
         )
     
-    def goals(self, session_id: str, state: dict, pretty=True, failure=False, timeout=10) -> List[dict]:
+    def goals(self, session_id: str, state: State, pretty=True, failure=False, timeout=10) -> List[Goal]:
         """Gather goals associated to a state. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
             goals = worker.goals(state, pretty=pretty)
-            return [goal.to_json() for goal in goals]
+            return goals
 
         return self._pet_call(
             session_id,
@@ -445,7 +450,7 @@ class SessionManager:
             state=state
         )
 
-    def complete_goals(self, session_id: str, state: dict, pretty=True, failure=False, timeout=10) -> List[dict]:
+    def complete_goals(self, session_id: str, state: State, pretty=True, failure=False, timeout=10) -> List[Dict]:
         """Gather complete goals associated to a state. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
@@ -461,7 +466,7 @@ class SessionManager:
             state=state
         )
 
-    def premises(self, session_id: str, state: dict, failure=False, timeout=10) -> List[str]:
+    def premises(self, session_id: str, state: State, failure=False, timeout=10) -> Any:
         """Gather accessible premises (lemmas, definitions) from a state. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
@@ -477,11 +482,26 @@ class SessionManager:
             state=state
         )
 
-    def state_equal(self, session_id: str, st1: dict, st2: dict, kind: str, failure=False, timeout=10) -> bool:
-        """Check whether st1 is equal to st2. See pytanque documentation for more details."""
-        raise Exception('Endpoint Not Implemented (yet).')
+    def state_equal(self, session_id: str, st1: State, st2: State, kind: Inspect, failure=False, timeout=10) -> bool:
+        """Check whether st1 is equal to st2. Beware st1, and st2 are expected to belong to the same session. See pytanque documentation for more details."""
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+            nonlocal st2
+            lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+            if st2.hash in sess.mapping_state:
+                st2 = sess.mapping_state[st2.hash]
+            result = worker.state_equal(state, st2, kind)
+            return result
 
-    def state_hash(self, session_id: str, state: dict, failure=False, timeout=10) -> int:
+        return self._pet_call(
+            session_id,
+            timeout=timeout,
+            failure=failure,
+            error_prefix="State hash failed",
+            op=op,
+            state=st1
+        )
+
+    def state_hash(self, session_id: str, state: State, failure=False, timeout=10) -> int:
         """Get a hash value for a proof state. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
@@ -512,7 +532,7 @@ class SessionManager:
             op=op
         )
     
-    def ast(self, session_id: str, state: dict, text: str, failure=False, timeout=120) -> dict:
+    def ast(self, session_id: str, state: State, text: str, failure=False, timeout=120) -> Dict:
         """Get ast of a command parsed at a state. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
@@ -528,7 +548,7 @@ class SessionManager:
             state=state
         )
 
-    def ast_at_pos(self, session_id: str, file: str, line: int, character: int, failure=False, timeout=120) -> dict:
+    def ast_at_pos(self, session_id: str, file: str, line: int, character: int, failure=False, timeout=120) -> Dict:
         """Get ast at a specified position in a file. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
@@ -543,12 +563,12 @@ class SessionManager:
             op=op
         )
 
-    def get_root_state(self, session_id: str, file: str, failure=False, timeout=120) -> dict:
+    def get_root_state(self, session_id: str, file: str, opts: Optional[Opts]=None, failure=False, timeout=120) -> State:
         """Get root state of a document. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            state = worker.get_root_state(file)
-            return state.to_json()
+            state = worker.get_root_state(file, opts=opts)
+            return state
 
         return self._pet_call(
             session_id,
@@ -558,7 +578,7 @@ class SessionManager:
             op=op
         )
     
-    def list_notations_in_statement(self, session_id: str, state: dict, statement: str, failure=False, timeout=10) -> list[dict]:
+    def list_notations_in_statement(self, session_id: str, state: State, statement: str, failure=False, timeout=10) -> list[Dict]:
         """Get the list of notations appearing in a theorem/lemma statement. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
@@ -574,12 +594,12 @@ class SessionManager:
             state=state
         )
 
-    def start(self, session_id: str, file: str, thm: str, pre_commands: Optional[str]=None, failure=False, timeout=120) -> dict:
+    def start(self, session_id: str, file: str, thm: str, pre_commands: Optional[str]=None, opts: Optional[Opts]=None, failure=False, timeout=120) -> State:
         """Start a proof session for a specific theorem in a Coq/Rocq file. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            state = worker.start(file, thm, pre_commands=pre_commands)
-            return state.to_json()
+            state = worker.start(file, thm, pre_commands=pre_commands, opts=opts)
+            return state
 
         return self._pet_call(
             session_id,
@@ -589,6 +609,17 @@ class SessionManager:
             op=op
         )
 
-    def query(self, params: dict, size:int=4096) -> dict:
-        """Send a low-level JSON-RPC query to the server. See pytanque documentation for more details."""
-        raise Exception('Endpoint Not Implemented (yet).')
+    # def query(self, session_id: str, params: Params, size:int=4096, failure=False, timeout=120) -> Response:
+    #     """Send a low-level JSON-RPC query to the server. See pytanque documentation for more details."""
+    #     def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+    #         lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+    #         resp = worker.query(params, size)
+    #         return resp
+        
+    #     return self._pet_call(
+    #         session_id,
+    #         timeout=timeout,
+    #         failure=failure,
+    #         error_prefix="Get root state failed",
+    #         op=op
+    #     )
