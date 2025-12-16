@@ -9,6 +9,7 @@ import psutil
 import pytest
 import requests
 
+from src.rocq_ml_toolbox.inference.client import ClientError, PetClient
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -132,3 +133,9 @@ def server_url(pytestconfig, request) -> str:
                 proc.wait(timeout=2)
             except Exception:
                 pass
+
+@pytest.fixture(scope="session")
+def client(server_url):
+    client = PetClient(server_url)
+    client.connect()
+    return client

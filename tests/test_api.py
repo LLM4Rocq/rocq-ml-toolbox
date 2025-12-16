@@ -14,7 +14,6 @@ from pytanque.protocol import (
     InspectGoals,
     InspectPhysical
 )
-from src.rocq_ml_toolbox.inference.client import ClientError, PetClient
 
 MC_DIR = os.environ.get("MC_DIR", "stress_test_light/source")
 
@@ -55,10 +54,6 @@ def needle_pos(local_fraction_v_abs):
 @pytest.fixture(scope="session")
 def lemma_pos(local_fraction_v_abs):
     return _find_line_char(local_fraction_v_abs, "Lemma tofrac_eq0")
-
-@pytest.fixture(scope="session")
-def client(server_url):
-    return PetClient(server_url)
 
 
 @pytest.fixture(scope="session")

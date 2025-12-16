@@ -24,8 +24,7 @@ def kill_all_proc(proc_name: str):
             proc.kill()
     time.sleep(1)
 
-def try_proof_kill(entry, server_url: str) -> bool:
-    client = PetClient(server_url)
+def try_proof_kill(entry, client) -> bool:
     filepath = os.path.join(MC_DIR, entry['filepath'])
     try:
         state = client.get_state_at_pos(filepath, entry['line'], entry['character'])
@@ -128,8 +127,7 @@ def _load_subset_valid(n: int):
         cache.write_text(json.dumps(payload))
         return payload
 
-def try_proof(entry, server_url, retry=1, failure_rate=0.) -> bool:
-    client = PetClient(server_url)
+def try_proof(entry, client, retry=1, failure_rate=0.) -> bool:
     filepath = os.path.join(MC_DIR, entry["filepath"])
 
     retry = max(1, int(retry))
@@ -175,35 +173,35 @@ def try_proof(entry, server_url, retry=1, failure_rate=0.) -> bool:
 
 
 @pytest.mark.validation
-def test_validation(server_url, stress_workers, stress_n):
+def test_validation(client, stress_workers, stress_n):
     selection = _load_subset_balanced(stress_n)
 
     results = []
     with concurrent.futures.ProcessPoolExecutor(max_workers=stress_workers) as ex:
-        futures = [ex.submit(try_proof, entry, server_url) for entry in selection]
+        futures = [ex.submit(try_proof, entry, client) for entry in selection]
         for f in concurrent.futures.as_completed(futures):
             results.append(f.result())
 
     assert all(results), f"Some proofs failed: {results.count(False)} / {len(results)}"
 
 @pytest.mark.replay
-def test_replay(server_url, stress_workers, stress_n):
+def test_replay(client, stress_workers, stress_n):
     selection = _load_subset_valid(stress_n)
 
     results = []
     with concurrent.futures.ProcessPoolExecutor(max_workers=stress_workers) as ex:
-        futures = [ex.submit(try_proof, entry, server_url, failure_rate=0.3) for entry in selection]
+        futures = [ex.submit(try_proof, entry, client, failure_rate=0.3) for entry in selection]
         for f in concurrent.futures.as_completed(futures):
             results.append(f.result())
 
     assert all(results), f"Some proofs failed: {results.count(False)} / {len(results)}"
 
 @pytest.mark.manual_kill
-def test_manual_kill(server_url, stress_n):
+def test_manual_kill(client, stress_n):
     selection = _load_subset_valid(stress_n)
 
     results = []
     for entry in selection:
-        results.append(try_proof_kill(entry, server_url))
+        results.append(try_proof_kill(entry, client))
 
     assert all(results), f"Some proofs failed: {results.count(False)} / {len(results)}"
