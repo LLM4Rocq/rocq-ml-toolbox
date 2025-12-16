@@ -4,6 +4,12 @@ import logging
 
 from flask import Flask, request, jsonify, current_app
 from pytanque import State, PetanqueError
+from pytanque.client import Params
+from pytanque.protocol import (
+    Opts,
+    State,
+    Inspect
+)
 
 from .sessions import SessionManager, UnresponsiveError
 
@@ -124,7 +130,7 @@ def get_state_at_pos():
         return err
 
     state = session_manager.get_state_at_pos(**data)
-    output = {"state": state}
+    output = {"resp": state.to_json()}
     return jsonify(output), 200
 
 
@@ -143,8 +149,9 @@ def run():
     if err is not None:
         return err
     
+    data['state'] = State.from_json(data['state'])
     state = session_manager.run(**data)
-    output = {"state": state}
+    output = {"resp": state.to_json()}
     return jsonify(output), 200
 
 @app.route("/goals", methods=["POST"])
@@ -161,8 +168,9 @@ def goals():
     if err is not None:
         return err
     
+    data['state'] = State.from_json(data['state'])
     goals = session_manager.goals(**data)
-    output = {"goals": goals}
+    output = {"resp": [goal.to_json() for goal in goals]}
     return jsonify(output), 200
 
 @app.route("/complete_goals", methods=["POST"])
@@ -179,8 +187,9 @@ def complete_goals():
     if err is not None:
         return err
     
+    data['state'] = State.from_json(data['state'])
     goals = session_manager.complete_goals(**data)
-    output = {"goals": goals}
+    output = {"resp": goals}
     return jsonify(output), 200
 
 @app.route("/premises", methods=["POST"])
@@ -197,8 +206,9 @@ def premises():
     if err is not None:
         return err
     
+    data['state'] = State.from_json(data['state'])
     premises = session_manager.premises(**data)
-    output = {"premises": premises}
+    output = {"resp": premises}
     return jsonify(output), 200
 
 @app.route("/state_equal", methods=["POST"])
@@ -212,13 +222,17 @@ def state_equal():
         - kind: comparison type
         - session_id: session ID from /login
     """
+    
     data = request.get_json(force=True, silent=False)
     err = require_json_fields(data, ["session_id", "st1", "st2", "kind"])
     if err is not None:
         return err
     
+    data['st1'] = State.from_json(data['st1'])
+    data['st2'] = State.from_json(data['st2'])
+    data['kind'] = Inspect.from_json(data['kind'])
     result = session_manager.state_equal(**data)
-    output = {"result": result}
+    output = {"resp": result}
     return jsonify(output), 200
 
 @app.route("/state_hash", methods=["POST"])
@@ -235,8 +249,9 @@ def state_hash():
     if err is not None:
         return err
     
+    data['state'] = State.from_json(data['state'])
     hash = session_manager.state_hash(**data)
-    output = {"hash": hash}
+    output = {"resp": hash}
     return jsonify(output), 200
 
 @app.route("/toc", methods=["POST"])
@@ -254,7 +269,7 @@ def toc():
         return err
     
     toc = session_manager.toc(**data)
-    output = {"toc": toc}
+    output = {"resp": toc}
     return jsonify(output), 200
 
 @app.route("/ast", methods=["POST"])
@@ -272,8 +287,9 @@ def ast():
     if err is not None:
         return err
     
+    data['state'] = State.from_json(data['state'])
     ast = session_manager.ast(**data)
-    output = {"ast": ast}
+    output = {"resp": ast}
     return jsonify(output), 200
 
 @app.route("/ast_at_pos", methods=["POST"])
@@ -293,7 +309,7 @@ def ast_at_pos():
         return err
     
     ast = session_manager.ast_at_pos(**data)
-    output = {"ast": ast}
+    output = {"resp": ast}
     return jsonify(output), 200
 
 @app.route("/get_root_state", methods=["POST"])
@@ -310,8 +326,9 @@ def get_root_state():
     if err is not None:
         return err
     
+    data['opts'] = Opts.from_json(data['opts']) if 'opts' in data and data['opts'] else None
     state = session_manager.get_root_state(**data)
-    output = {"state": state}
+    output = {"resp": state.to_json()}
     return jsonify(output), 200
 
 @app.route("/list_notations_in_statement", methods=["POST"])
@@ -329,8 +346,9 @@ def list_notations_in_statement():
     if err is not None:
         return err
     
+    data['state'] = State.from_json(data['state'])
     notations = session_manager.list_notations_in_statement(**data)
-    output = {"notations": notations}
+    output = {"resp": notations}
     return jsonify(output), 200
 
 @app.route("/start", methods=["POST"])
@@ -348,9 +366,30 @@ def start():
     if err is not None:
         return err
     
+    data['opts'] = Opts.from_json(data['opts']) if 'opts' in data and data['opts'] else None
     state = session_manager.start(**data)
-    output = {"state": state}
+    output = {"resp": state.to_json()}
     return jsonify(output), 200
+
+# @app.route("/query", methods=["POST"])
+# def query():
+#     """
+#     Send a low-level JSON-RPC query to the server.
+
+#     Expects JSON:
+#         - params
+#         - size
+#         - session_id: session ID from /login
+#     """
+#     data = request.get_json(force=True, silent=False)
+#     err = require_json_fields(data, ["params", "size"])
+#     if err is not None:
+#         return err
+    
+#     data['params'] = data['params'].to_json()
+#     resp = session_manager.start(**data)
+#     output = {"resp": resp.to_json()}
+#     return jsonify(output), 200
 
 @app.route("/get_session", methods=["POST"])
 def get_session():
@@ -359,4 +398,4 @@ def get_session():
     if err is not None:
         return err
     session_id = data["session_id"]
-    return jsonify(session_manager.get_session(session_id).to_dict()), 200
+    return jsonify(session_manager.get_session(session_id).to_json()), 200
