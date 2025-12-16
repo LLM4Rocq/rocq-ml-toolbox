@@ -28,10 +28,10 @@ def try_proof_kill(entry, server_url: str) -> bool:
     client = PetClient(server_url)
     filepath = os.path.join(MC_DIR, entry['filepath'])
     try:
-        state, _ = client.start_thm(filepath, entry['line'], entry['character'])
+        state = client.start_thm(filepath, entry['line'], entry['character'])
         for step in entry['proof_steps']:
             kill_all_proc('pet-server')
-            state, _ = client.run(state, step)
+            state = client.run(state, step)
     except Exception as e:
         return False
     
@@ -154,7 +154,7 @@ def try_proof(entry, server_url, retry=1, failure_rate=0.) -> bool:
                     raise  # bubble up to return False
 
     try:
-        state, _ = call_with_failover(
+        state = call_with_failover(
             client.start_thm,
             filepath,
             entry["line"],
@@ -163,7 +163,7 @@ def try_proof(entry, server_url, retry=1, failure_rate=0.) -> bool:
 
         for step in entry["proof_steps"]:
 
-            state, _ = call_with_failover(
+            state = call_with_failover(
                 client.run,
                 state,
                 step
