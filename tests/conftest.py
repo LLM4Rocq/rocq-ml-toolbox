@@ -85,11 +85,11 @@ def _start_gunicorn(bind_host: str, bind_port: int) -> subprocess.Popen:
         "gunicorn",
         "-w", "9",
         "-b", f"{bind_host}:{bind_port}",
-        "inference_server.app:app",
+        "src.rocq_ml_toolbox.inference.server:app",
         "-t", "600",
-        "-c", "inference_server/gunicorn.config.py",
-        "--error-logfile", "-",
-        "--log-level", "warning",
+        "-c", "python:src.rocq_ml_toolbox.inference.gunicorn_config",
+        "--error-logfile", "gunicorn-error.log",
+        "--access-logfile", "gunicorn-access.log",
         "--capture-output",
     ]
     env = os.environ.copy()
