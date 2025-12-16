@@ -1,13 +1,16 @@
+from __future__ import annotations
 from dataclasses import dataclass, asdict
 import time
-from typing import List, Optional, Dict, Tuple, Any
-import os
+from typing import List, Optional, Dict, Tuple, Any, Callable, Iterator, TypeVar
+from contextlib import contextmanager
+
+T = TypeVar("T")
+
 import json
 import uuid
 import signal
-import random
 
-from pytanque import Pytanque, State, Goal, PetanqueError
+from pytanque import Pytanque, State, PetanqueError
 
 import redis
 from redis.lock import Lock
@@ -32,7 +35,7 @@ class CacheState:
     state: State
 
     @classmethod
-    def from_json(cls, raw: Dict[str, Any]) -> "CacheState":
+    def from_json(cls, raw: Dict[str, Any]) -> CacheState:
         return cls(
             pet_idx=raw['pet_idx'],
             generation=raw['generation'],
@@ -58,7 +61,7 @@ class Session:
     mapping_state: Dict[int, State]  # to map old states with new states in case of replay
 
     @classmethod
-    def from_dict(cls, raw: Dict[str, Any]) -> "Session":
+    def from_dict(cls, raw: Dict[str, Any]) -> Session:
         tactics = [(State.from_json(st_json), tac) for st_json, tac in raw.get("tactics", [])]
         mapping_state_raw = raw.get("mapping_state", {})
         mapping_state = {int(k): State.from_json(v_json) for k, v_json in mapping_state_raw.items()}
@@ -91,17 +94,15 @@ class UnresponsiveError(Exception):
 
 class SessionManager:
 
-    def __init__(self, redis_url: str, pet_server_start_port: int=8765, num_pet_server: int=8, timeout_start_thm: int=60, timeout_run: int=30, timeout_ok: int=15):
+    def __init__(self, redis_url: str, pet_server_start_port: int=8765, num_pet_server: int=4, timeout_ok: int=15, timeout_eps: int=10):
         self.redis_client = redis.Redis.from_url(redis_url)
         self.ports = [pet_server_start_port + k for k in range(num_pet_server)]
         self.pytanques: List[Optional[Pytanque]] = [None] * num_pet_server
         self.worker_generations: List[Optional[int]] = [None] * num_pet_server
         self.sessions: Dict[str, Session] = {} # session_id -> Session
         self.num_pet_server = num_pet_server
-        self.timeout_start_thm = timeout_start_thm
-        self.timeout_run = timeout_run
         self.timeout_ok = timeout_ok
-        self.max_timeout = max(timeout_start_thm, timeout_run)
+        self.timeout_eps = timeout_eps
 
     @staticmethod
     def handler(signum, frame):
@@ -112,7 +113,7 @@ class SessionManager:
         """Save session to Redis."""
         self.redis_client.set(
             session_key(sess.session_id),
-            json.dumps(Session.to_dict(sess))
+            json.dumps(sess.to_dict())
         )
 
     def get_session(self, session_id: str) -> Session:
@@ -137,6 +138,7 @@ class SessionManager:
         return int(data)
 
     def _get_state_at_pos(self, pet_idx: int, filepath: str, line: int, character: int) -> State:
+        """get_state_at_pos wrapper to cache state."""
         worker = self._get_worker(pet_idx)
         id_str = str({
             "filepath": filepath,
@@ -246,7 +248,7 @@ class SessionManager:
             raise UnresponsiveError(f"pet_idx {pet_idx} is busy")
         return lock
 
-    def create_session(self, timeout: int=10) -> Session:
+    def create_session(self, timeout: int=10) -> str:
         """Create a new session with load-balanced pet-server assignment."""
         lock = self.redis_client.lock(
             session_lock_key(),
@@ -264,29 +266,32 @@ class SessionManager:
         self.sessions[uid] = sess
 
         lock.release()
-        return sess
+        return sess.session_id
     
-    def check_session(self, sess: Session):
+    def check_session(self, sess: Session, lock:Lock, timeout_run=60, timeout_get_state=120) -> Session:
         """If sess.generation is outdated, replay the tactics to recreate cache states on current pet-server generation."""
         current_generation = self.get_generation(sess.pet_idx)
         if sess.generation == current_generation:
-            return  # No need to replay
+            return sess # No need to replay
         
         worker = self._get_worker(sess.pet_idx)
         state = None
         if sess.filepath:
             try:
                 signal.signal(signal.SIGALRM, SessionManager.handler)
-                signal.alarm(self.timeout_start_thm)
+                signal.alarm(timeout_get_state)
+                lock.extend(timeout_get_state+self.timeout_eps, replace_ttl=True)
                 state = self._get_state_at_pos(sess.pet_idx, sess.filepath, sess.line, sess.character)
                 for old_state, tactic in sess.tactics:
-                    signal.alarm(self.timeout_run)
-                    state = worker.run(state, tactic, verbose=False, timeout=self.timeout_run)
+                    signal.alarm(timeout_run)
+                    lock.extend(timeout_run+self.timeout_eps, replace_ttl=True)
+                    state = worker.run(state, tactic, verbose=False, timeout=timeout_run)
                     sess.mapping_state[old_state.hash] = state
             finally:
                 signal.alarm(0)
         sess.generation = current_generation
         self.save_session(sess)  # Update session with new generation
+        return sess
     
     def send_kill_signal(self, pet_idx: int):
         """Send a kill signal to the pet-server at pet_idx."""
@@ -296,87 +301,60 @@ class SessionManager:
     def _failure_simulation(self):
         raise UnresponsiveError("Forced failure (Debugging purpose).")
 
-    def start_thm(self, session_id: str, filepath: str, line: int, character: int, failure: bool=False) -> Tuple[State, List[Goal]]:
-        """Start a theorem proving session for the theorem at the given position."""
-        sess = self.get_session(session_id)
-        pet_idx = sess.pet_idx
-        lock: Optional[Lock] = None
+    @contextmanager
+    def _alarm(self, seconds: Optional[int]) -> Iterator[None]:
+        if not seconds:
+            yield
+            return
+        prev = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, SessionManager.handler)
+        signal.alarm(int(seconds))
         try:
-            lock = self.acquire_pet_lock(pet_idx, timeout=self.max_timeout + 5)
-            self.ensure_pet_ok(pet_idx, timeout=self.timeout_ok)
-            sess = self.get_session(session_id)
-            pet_idx = sess.pet_idx
-            sess.generation = self.get_generation(pet_idx)
-            worker = self._get_worker(pet_idx)
-
-            if failure:
-                self._failure_simulation()
-            signal.signal(signal.SIGALRM, SessionManager.handler)
-            signal.alarm(self.timeout_start_thm)
-
-            state = self._get_state_at_pos(pet_idx, filepath, line, character)
-            goals = worker.goals(state)
-            signal.alarm(0)  # Disable alarm
-
-            if sess.tactics:
-                # archive session if non empty previous session
-                self.archive_session(sess)
-            sess.filepath = filepath
-            sess.line = line
-            sess.character = character
-            sess.tactics = [(state, "")]
-            sess.mapping_state = {}
-
-            self.save_session(sess)
-            return state, goals
-        except KeyError: raise
-        except PetanqueError: raise
-        except Exception as e:
-            # No response, need to restart pet server
-            self.send_kill_signal(pet_idx)
-            raise UnresponsiveError(f"Start theorem failed ({e}); kill signal sent to pet-server.") from e
+            yield
         finally:
             signal.alarm(0)
-            if lock is not None:
-                try:
-                    lock.release()
-                except redis.exceptions.LockError:
-                    # Lock might have expired; safe to ignore
-                    pass
+            signal.signal(signal.SIGALRM, prev)
 
-    def run(self, session_id: str, state: State, tactic: str, failure: bool=False) -> Tuple[State, List[Goal]]:
-        """Execute a given tactic on the current proof state."""
+    @contextmanager
+    def _pet_ctx(
+        self,
+        session_id: str,
+        failure: bool,
+        error_prefix: str,
+        state: Optional[dict]=None
+    ) -> Iterator[Tuple["Session", Pytanque, Lock, Optional[State]]]:
         sess = self.get_session(session_id)
         pet_idx = sess.pet_idx
         lock: Optional[Lock] = None
         try:
-            lock = self.acquire_pet_lock(pet_idx, timeout=self.max_timeout + 5)
+            lock = self.acquire_pet_lock(pet_idx, timeout=self.timeout_ok + self.timeout_eps)
             self.ensure_pet_ok(pet_idx, timeout=self.timeout_ok)
-            self.check_session(sess)
             sess = self.get_session(session_id)
-            if state.hash in sess.mapping_state:
-                state = sess.mapping_state[state.hash] # update state, required in case of replay
+            state_obj = None
+            if state:
+                state_obj = State.from_json(state)
+                sess = self.check_session(sess, lock) # refresh after potential replay
+
+                if state_obj.hash in sess.mapping_state:
+                    state_obj = sess.mapping_state[state_obj.hash]
+
             worker = self._get_worker(sess.pet_idx)
-            
+
             if failure:
                 self._failure_simulation()
-            signal.signal(signal.SIGALRM, SessionManager.handler)
-            signal.alarm(self.timeout_run)
-            state = worker.run(state, tactic, verbose=False, timeout=self.timeout_run)
-            goals = worker.goals(state)
-            signal.alarm(0)
 
-            sess.tactics.append((state, tactic))
-            self.save_session(sess)
+            yield sess, worker, lock, state_obj
 
-            return state, goals
-        except KeyError: raise
-        except PetanqueError: raise
+        except KeyError:
+            raise
+        except PetanqueError:
+            raise
+        except ValueError:
+            raise
         except Exception as e:
-            # No response, need to restart pet server
             self.send_kill_signal(pet_idx)
             raise UnresponsiveError(
-                f"Tactic execution failed ({e}); kill signal sent to pet-server."
+                f"{error_prefix} ({e}); kill signal sent to pet-server."
             ) from e
         finally:
             signal.alarm(0)
@@ -384,5 +362,233 @@ class SessionManager:
                 try:
                     lock.release()
                 except redis.exceptions.LockError:
-                    # Lock might have expired; safe to ignore
                     pass
+
+    def _pet_call(
+        self,
+        session_id: str,
+        timeout: Optional[int],
+        failure: bool,
+        error_prefix: str,
+        op: Callable[[Session, Pytanque, Lock, Optional[State]], T],
+        state: Optional[dict] = None
+    ) -> T:
+        with self._pet_ctx(
+            session_id,
+            failure=failure,
+            error_prefix=error_prefix,
+            state=state
+        ) as (sess, worker, lock, new_state):
+            with self._alarm(timeout):
+                return op(sess, worker, lock, new_state)
+
+    def get_state_at_pos(self, session_id: str, filepath: str, line: int, character: int, failure: bool=False, timeout=120) -> dict:
+        """Start a theorem proving session for the theorem at the given position. See pytanque documentation for more details."""
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: Optional[State]):
+            sess.generation = self.get_generation(sess.pet_idx)
+
+            lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+            state = self._get_state_at_pos(sess.pet_idx, filepath, line, character)
+            if sess.tactics:
+                self.archive_session(sess)
+            
+            sess.filepath = filepath
+            sess.line = line
+            sess.character = character
+            sess.tactics = [(state, "")]
+            sess.mapping_state = {}
+            self.save_session(sess)
+
+            return state.to_json()
+
+        return self._pet_call(
+            session_id,
+            timeout=timeout,
+            failure=failure,
+            error_prefix="Start theorem failed",
+            op=op,
+        )
+
+    def run(self, session_id: str, state: dict, tactic: str, failure: bool=False, timeout=60) -> dict:
+        """Execute a given tactic on the current proof state. See pytanque documentation for more details."""
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+            lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+            new_state = worker.run(state, tactic, verbose=False, timeout=timeout)
+
+            sess.tactics.append((new_state, tactic))
+            self.save_session(sess)
+
+            return new_state.to_json()
+
+        return self._pet_call(
+            session_id,
+            timeout=timeout,
+            failure=failure,
+            error_prefix="Tactic execution failed",
+            op=op,
+            state=state
+        )
+    
+    def goals(self, session_id: str, state: dict, pretty=True, failure=False, timeout=10) -> List[dict]:
+        """Gather goals associated to a state. See pytanque documentation for more details."""
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+            lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+            goals = worker.goals(state, pretty=pretty)
+            return [goal.to_json() for goal in goals]
+
+        return self._pet_call(
+            session_id,
+            timeout=timeout,
+            failure=failure,
+            error_prefix="Goals gathering failed",
+            op=op,
+            state=state
+        )
+
+    def complete_goals(self, session_id: str, state: dict, pretty=True, failure=False, timeout=10) -> List[dict]:
+        """Gather complete goals associated to a state. See pytanque documentation for more details."""
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+            lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+            goals = worker.complete_goals(state, pretty=pretty)
+            return goals
+
+        return self._pet_call(
+            session_id,
+            timeout=timeout,
+            failure=failure,
+            error_prefix="Complete goals gathering failed",
+            op=op,
+            state=state
+        )
+
+    def premises(self, session_id: str, state: dict, failure=False, timeout=10) -> List[str]:
+        """Gather accessible premises (lemmas, definitions) from a state. See pytanque documentation for more details."""
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+            lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+            premises = worker.premises(state)
+            return premises
+
+        return self._pet_call(
+            session_id,
+            timeout=timeout,
+            failure=failure,
+            error_prefix="Premises gathering failed",
+            op=op,
+            state=state
+        )
+
+    def state_equal(self, session_id: str, st1: dict, st2: dict, kind: str, failure=False, timeout=10) -> bool:
+        """Check whether st1 is equal to st2. See pytanque documentation for more details."""
+        raise Exception('Endpoint Not Implemented (yet).')
+
+    def state_hash(self, session_id: str, state: dict, failure=False, timeout=10) -> int:
+        """Get a hash value for a proof state. See pytanque documentation for more details."""
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+            lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+            hash = worker.state_hash(state)
+            return hash
+
+        return self._pet_call(
+            session_id,
+            timeout=timeout,
+            failure=failure,
+            error_prefix="State hash failed",
+            op=op,
+            state=state
+        )
+
+    def toc(self, session_id: str, file: str, failure=False, timeout=120) -> list[tuple[str, Any]]:
+        """Get toc of a file. See pytanque documentation for more details."""
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+            lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+            toc = worker.toc(file)
+            return toc
+
+        return self._pet_call(
+            session_id,
+            timeout=timeout,
+            failure=failure,
+            error_prefix="Toc failed",
+            op=op
+        )
+    
+    def ast(self, session_id: str, state: dict, text: str, failure=False, timeout=120) -> dict:
+        """Get ast of a command parsed at a state. See pytanque documentation for more details."""
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+            lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+            ast = worker.ast(state, text)
+            return ast
+
+        return self._pet_call(
+            session_id,
+            timeout=timeout,
+            failure=failure,
+            error_prefix="AST failed",
+            op=op,
+            state=state
+        )
+
+    def ast_at_pos(self, session_id: str, file: str, line: int, character: int, failure=False, timeout=120) -> dict:
+        """Get ast at a specified position in a file. See pytanque documentation for more details."""
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+            lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+            ast = worker.ast_at_pos(file, line, character)
+            return ast
+
+        return self._pet_call(
+            session_id,
+            timeout=timeout,
+            failure=failure,
+            error_prefix="AST at position failed",
+            op=op
+        )
+
+    def get_root_state(self, session_id: str, file: str, failure=False, timeout=120) -> dict:
+        """Get root state of a document. See pytanque documentation for more details."""
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+            lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+            state = worker.get_root_state(file)
+            return state.to_json()
+
+        return self._pet_call(
+            session_id,
+            timeout=timeout,
+            failure=failure,
+            error_prefix="Get root state failed",
+            op=op
+        )
+    
+    def list_notations_in_statement(self, session_id: str, state: dict, statement: str, failure=False, timeout=10) -> list[dict]:
+        """Get the list of notations appearing in a theorem/lemma statement. See pytanque documentation for more details."""
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+            lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+            notations = worker.list_notations_in_statement(state, statement)
+            return notations
+
+        return self._pet_call(
+            session_id,
+            timeout=timeout,
+            failure=failure,
+            error_prefix="List notations in statement failed",
+            op=op,
+            state=state
+        )
+
+    def start(self, session_id: str, file: str, thm: str, pre_commands: Optional[str]=None, failure=False, timeout=120) -> dict:
+        """Start a proof session for a specific theorem in a Coq/Rocq file. See pytanque documentation for more details."""
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+            lock.extend(timeout+self.timeout_eps, replace_ttl=True)
+            state = worker.start(file, thm, pre_commands=pre_commands)
+            return state.to_json()
+
+        return self._pet_call(
+            session_id,
+            timeout=timeout,
+            failure=failure,
+            error_prefix="Get root state failed",
+            op=op
+        )
+
+    def query(self, params: dict, size:int=4096) -> dict:
+        """Send a low-level JSON-RPC query to the server. See pytanque documentation for more details."""
+        raise Exception('Endpoint Not Implemented (yet).')
