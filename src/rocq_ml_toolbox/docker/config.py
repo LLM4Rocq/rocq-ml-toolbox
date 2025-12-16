@@ -1,26 +1,27 @@
-"""Configuration objects describing OPAM-based Coq environments."""
-
+from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, Self
 
 import yaml
 
 @dataclass
-class OpamConfig:
-    """Configuration for building and querying a library Docker image."""
-
+class DockerConfig:
+    """Configuration for building a library Docker image."""
     name: str
-    output: str
     tag: str
-    packages: list[str]
     base_image: str
-    opam_env_path: str
     user: str
-    info_path: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_yaml(cls, path: str) -> "OpamConfig":
+    def from_yaml(cls, path: str) -> Self:
         """Load an `OpamConfig` from a YAML file."""
         with open(path) as f:
             data = yaml.safe_load(f)
         return cls(**data)
+
+@dataclass
+class OpamConfig(DockerConfig):
+    """Configuration for building an Opam Docker image."""
+    opam_env_path: str
+    packages: list[str]
+    info_path: Dict[str, str] = field(default_factory=dict)

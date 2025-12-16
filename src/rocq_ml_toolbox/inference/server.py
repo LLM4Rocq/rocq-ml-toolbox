@@ -4,6 +4,12 @@ import logging
 
 from flask import Flask, request, jsonify, current_app
 from pytanque import State, PetanqueError
+from pytanque.client import Params
+from pytanque.protocol import (
+    Opts,
+    State,
+    Inspect
+)
 
 from .sessions import SessionManager, UnresponsiveError
 
@@ -17,8 +23,7 @@ session_manager = SessionManager(
     redis_url=REDIS_URL,
     pet_server_start_port=PET_SERVER_START_PORT,
     num_pet_server=NUM_PET_SERVER,
-    timeout_start_thm=120,
-    timeout_run=60,
+    timeout_ok=15
 )
 
 gunicorn_error_logger = logging.getLogger("gunicorn.error")
@@ -104,14 +109,14 @@ def login():
     """
     Return a session object with assigned pet-server index and unique session ID.
     """
-    sess = session_manager.create_session()
-    return jsonify({"session_id": sess.session_id}), 200
+    session_id = session_manager.create_session()
+    return jsonify({"session_id": session_id}), 200
 
 
-@app.route("/start_thm", methods=["POST"])
-def start_thm():
+@app.route("/get_state_at_pos", methods=["POST"])
+def get_state_at_pos():
     """
-    Start a theorem.
+    Get state at position.
 
     Expects JSON:
         - session_id (str)
@@ -120,19 +125,12 @@ def start_thm():
         - character (int)
     """
     data = request.get_json(force=True, silent=False)
-    err = require_json_fields(data, ["session_id", "filepath", "line", "character", "failure"])
+    err = require_json_fields(data, ["session_id", "filepath", "line", "character"])
     if err is not None:
         return err
 
-    state, goals = session_manager.start_thm(
-        session_id=data["session_id"],
-        filepath=data["filepath"],
-        line=data["line"],
-        character=data["character"],
-        failure=data['failure']
-    )
-    goals_json = [goal.to_json() for goal in goals]
-    output = {"state": state.to_json(), "goals": goals_json}
+    state = session_manager.get_state_at_pos(**data)
+    output = {"resp": state.to_json()}
     return jsonify(output), 200
 
 
@@ -147,19 +145,251 @@ def run():
         - session_id: session ID from /login
     """
     data = request.get_json(force=True, silent=False)
-    err = require_json_fields(data, ["state", "tactic", "session_id", "failure"])
+    err = require_json_fields(data, ["state", "tactic", "session_id"])
     if err is not None:
         return err
-        
-    state, goals = session_manager.run(
-        session_id=data["session_id"],
-        state=State.from_json(data["state"]),
-        tactic=data["tactic"],
-        failure=data["failure"]
-    )
-    goals_json = [goal.to_json() for goal in goals]
-    output = {"state": state.to_json(), "goals": goals_json}
+    
+    data['state'] = State.from_json(data['state'])
+    state = session_manager.run(**data)
+    output = {"resp": state.to_json()}
     return jsonify(output), 200
+
+@app.route("/goals", methods=["POST"])
+def goals():
+    """
+    Gather goals associated to a state.
+
+    Expects JSON:
+        - state: the current proof state (JSON from previous response)
+        - session_id: session ID from /login
+    """
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["session_id", "state"])
+    if err is not None:
+        return err
+    
+    data['state'] = State.from_json(data['state'])
+    goals = session_manager.goals(**data)
+    output = {"resp": [goal.to_json() for goal in goals]}
+    return jsonify(output), 200
+
+@app.route("/complete_goals", methods=["POST"])
+def complete_goals():
+    """
+    Gather complete goals associated to a state.
+
+    Expects JSON:
+        - state: the current proof state (JSON from previous response)
+        - session_id: session ID from /login
+    """
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["session_id", "state"])
+    if err is not None:
+        return err
+    
+    data['state'] = State.from_json(data['state'])
+    goals = session_manager.complete_goals(**data)
+    output = {"resp": goals}
+    return jsonify(output), 200
+
+@app.route("/premises", methods=["POST"])
+def premises():
+    """
+    Gather accessible premises (lemmas, definitions) from a state.
+
+    Expects JSON:
+        - state: the current proof state (JSON from previous response)
+        - session_id: session ID from /login
+    """
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["session_id", "state"])
+    if err is not None:
+        return err
+    
+    data['state'] = State.from_json(data['state'])
+    premises = session_manager.premises(**data)
+    output = {"resp": premises}
+    return jsonify(output), 200
+
+@app.route("/state_equal", methods=["POST"])
+def state_equal():
+    """
+    Check whether state st1 is equal to state st2.
+
+    Expects JSON:
+        - st1: the first state
+        - st2: the second state
+        - kind: comparison type
+        - session_id: session ID from /login
+    """
+    
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["session_id", "st1", "st2", "kind"])
+    if err is not None:
+        return err
+    
+    data['st1'] = State.from_json(data['st1'])
+    data['st2'] = State.from_json(data['st2'])
+    data['kind'] = Inspect.from_json(data['kind'])
+    result = session_manager.state_equal(**data)
+    output = {"resp": result}
+    return jsonify(output), 200
+
+@app.route("/state_hash", methods=["POST"])
+def state_hash():
+    """
+    Get a hash value for a proof state.
+
+    Expects JSON:
+        - state
+        - session_id: session ID from /login
+    """
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["session_id", "state"])
+    if err is not None:
+        return err
+    
+    data['state'] = State.from_json(data['state'])
+    hash = session_manager.state_hash(**data)
+    output = {"resp": hash}
+    return jsonify(output), 200
+
+@app.route("/toc", methods=["POST"])
+def toc():
+    """
+    Get toc of a file.
+
+    Expects JSON:
+        - file
+        - session_id: session ID from /login
+    """
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["session_id", "file"])
+    if err is not None:
+        return err
+    
+    toc = session_manager.toc(**data)
+    output = {"resp": toc}
+    return jsonify(output), 200
+
+@app.route("/ast", methods=["POST"])
+def ast():
+    """
+    Get ast of a command parsed at a state.
+
+    Expects JSON:
+        - text: command to parse
+        - state
+        - session_id: session ID from /login
+    """
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["session_id", "text", "state"])
+    if err is not None:
+        return err
+    
+    data['state'] = State.from_json(data['state'])
+    ast = session_manager.ast(**data)
+    output = {"resp": ast}
+    return jsonify(output), 200
+
+@app.route("/ast_at_pos", methods=["POST"])
+def ast_at_pos():
+    """
+    Get ast at a specified position in a file.
+
+    Expects JSON:
+        - file
+        - line
+        - character
+        - session_id: session ID from /login
+    """
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["session_id", "file", "line", "character"])
+    if err is not None:
+        return err
+    
+    ast = session_manager.ast_at_pos(**data)
+    output = {"resp": ast}
+    return jsonify(output), 200
+
+@app.route("/get_root_state", methods=["POST"])
+def get_root_state():
+    """
+    Get root state of a document.
+
+    Expects JSON:
+        - file
+        - session_id: session ID from /login
+    """
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["session_id", "file"])
+    if err is not None:
+        return err
+    
+    data['opts'] = Opts.from_json(data['opts']) if 'opts' in data and data['opts'] else None
+    state = session_manager.get_root_state(**data)
+    output = {"resp": state.to_json()}
+    return jsonify(output), 200
+
+@app.route("/list_notations_in_statement", methods=["POST"])
+def list_notations_in_statement():
+    """
+    Get the list of notations appearing in a theorem/lemma statement.
+
+    Expects JSON:
+        - state
+        - statement
+        - session_id: session ID from /login
+    """
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["session_id", "state", "statement"])
+    if err is not None:
+        return err
+    
+    data['state'] = State.from_json(data['state'])
+    notations = session_manager.list_notations_in_statement(**data)
+    output = {"resp": notations}
+    return jsonify(output), 200
+
+@app.route("/start", methods=["POST"])
+def start():
+    """
+    Start a proof session for a specific theorem in a Coq/Rocq file.
+
+    Expects JSON:
+        - file
+        - thm
+        - session_id: session ID from /login
+    """
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["file", "thm"])
+    if err is not None:
+        return err
+    
+    data['opts'] = Opts.from_json(data['opts']) if 'opts' in data and data['opts'] else None
+    state = session_manager.start(**data)
+    output = {"resp": state.to_json()}
+    return jsonify(output), 200
+
+# @app.route("/query", methods=["POST"])
+# def query():
+#     """
+#     Send a low-level JSON-RPC query to the server.
+
+#     Expects JSON:
+#         - params
+#         - size
+#         - session_id: session ID from /login
+#     """
+#     data = request.get_json(force=True, silent=False)
+#     err = require_json_fields(data, ["params", "size"])
+#     if err is not None:
+#         return err
+    
+#     data['params'] = data['params'].to_json()
+#     resp = session_manager.start(**data)
+#     output = {"resp": resp.to_json()}
+#     return jsonify(output), 200
 
 @app.route("/get_session", methods=["POST"])
 def get_session():
@@ -168,4 +398,4 @@ def get_session():
     if err is not None:
         return err
     session_id = data["session_id"]
-    return jsonify(session_manager.get_session(session_id).to_dict()), 200
+    return jsonify(session_manager.get_session(session_id).to_json()), 200

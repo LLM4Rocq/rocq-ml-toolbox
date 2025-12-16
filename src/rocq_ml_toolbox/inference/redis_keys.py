@@ -1,4 +1,5 @@
 from enum import StrEnum
+from typing import List
 
 class PetStatus(StrEnum):
     OK = "OK"
@@ -31,3 +32,16 @@ def session_assigned_idx_key() -> str:
 
 def archived_sessions_key() -> str:
     return "archived_sessions"
+
+ALL_KEYS_STAR = [
+    session_key('*'),
+    cache_state_key('*'),
+    pet_status_key('*'),
+    generation_key('*'),
+    pet_lock_key('*'),
+    monitor_epoch_key('*'),
+    session_lock_key(),
+    session_assigned_idx_key(),
+    archived_sessions_key()
+]
+    

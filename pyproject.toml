@@ -1,6 +1,6 @@
 [project]
 name = "rocq_ml_toolbox"
-version = "0.0.1"
+version = "0.0.2"
 description = "A Rocq ML Toolbox to scrap dataset and do inference at scale."
 authors = [
     {name = "Théo Stoskopf", email = "theo.stoskopf@inria.fr"}
@@ -14,11 +14,11 @@ dependencies = []
 rocq-ml-server = "rocq_ml_toolbox.inference.cli:main"
 
 [project.optional-dependencies]
-scrape = []
-server = ["psutil", "redis", "flask", "gunicorn"] # pytanque
-docker = []
+parser = []
+server = ["flask", "gunicorn", "psutil", "redis"] # pytanque
+docker = ["docker", "pyyaml", "requests"]
 client = ["requests"]
-all = []
+all = ["docker", "flask", "gunicorn", "psutil", "pyyaml", "redis", "requests"]
 
 [build-system]
 requires = ["setuptools", "wheel"]

@@ -53,23 +53,27 @@ def try_proof(entry, server_url, retry=1, failure_rate=0.3):
                     raise  # bubble up to return False
 
     try:
-        state, _ = call_with_failover(
-            client.start_thm,
+        state = call_with_failover(
+            client.get_state_at_pos,
             filepath,
             entry["line"],
             entry["character"],
+            timeout=120
         )
 
         for step in entry["proof_steps"]:
 
-            state, _ = call_with_failover(
+            state = call_with_failover(
                 client.run,
                 state,
-                step
+                step,
+                timeout=60
             )
         return True
 
     except Exception as e:
+        print(e)
+        print("ISSUE")
         return False
 
 parser = argparse.ArgumentParser(description="Stress test-CLI")
@@ -81,7 +85,7 @@ parser.add_argument(
 parser.add_argument(
     "--max-workers",
     type=int,
-    default=16
+    default=8
 )
 args = parser.parse_args()
 

@@ -8,7 +8,7 @@ import psutil
 
 import redis
 
-from .redis_keys import monitor_epoch_key, pet_status_key, generation_key, cache_state_key, PetStatus
+from .redis_keys import monitor_epoch_key, pet_status_key, generation_key, cache_state_key, PetStatus, ALL_KEYS_STAR
 
 NUM_PET_SERVER = int(os.environ["NUM_PET_SERVER"])
 PET_SERVER_START_PORT = int(os.environ["PET_SERVER_START_PORT"])
@@ -41,6 +41,13 @@ def start_pet_servers():
         [(pet_idx, PET_SERVER_START_PORT + pet_idx, p.pid) for pet_idx, p in enumerate(pet_servers)],
         flush=True,
     )
+
+def kill_all_pet(proc_name='pet-server'):
+    """Killing all existing pet-servers."""
+    for proc in psutil.process_iter():
+        if proc.name() == proc_name:
+            proc.kill()
+    time.sleep(1)
 
 def stop_pet_servers():
     """Terminate all currently tracked pet-servers."""
@@ -150,9 +157,16 @@ def monitor_redis_for_restarts(pet_idx: int, poll_interval: float = 0.02):
             print(f"[arbiter] Error in Redis restart monitor: {e}", flush=True)
             time.sleep(poll_interval)
 
+def clean_redis_all():
+    for key in ALL_KEYS_STAR:
+        for subkey in redis_client.scan_iter(key):
+            redis_client.delete(subkey)
+
 def on_starting(server):
     """Called just before the master process is initialized."""
     global monitor_threads
+    clean_redis_all()
+    kill_all_pet()
     start_pet_servers()
 
     # Start background monitor thread in arbiter
@@ -169,5 +183,4 @@ def on_exit(server):
     """Called just before exiting Gunicorn master process."""
     stop_pet_servers()
     print(f"[arbiter] Clear cache state.", flush=True)
-    for key in redis_client.scan_iter("cache_state:*"):
-        redis_client.delete(key)
+    clean_redis_all()

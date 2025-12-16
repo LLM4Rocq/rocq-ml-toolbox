@@ -9,6 +9,7 @@ import psutil
 import pytest
 import requests
 
+from src.rocq_ml_toolbox.inference.client import ClientError, PetClient
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -85,11 +86,11 @@ def _start_gunicorn(bind_host: str, bind_port: int) -> subprocess.Popen:
         "gunicorn",
         "-w", "9",
         "-b", f"{bind_host}:{bind_port}",
-        "inference_server.app:app",
+        "src.rocq_ml_toolbox.inference.server:app",
         "-t", "600",
-        "-c", "inference_server/gunicorn.config.py",
-        "--error-logfile", "-",
-        "--log-level", "warning",
+        "-c", "python:src.rocq_ml_toolbox.inference.gunicorn_config",
+        "--error-logfile", "gunicorn-error.log",
+        "--access-logfile", "gunicorn-access.log",
         "--capture-output",
     ]
     env = os.environ.copy()
@@ -132,3 +133,9 @@ def server_url(pytestconfig, request) -> str:
                 proc.wait(timeout=2)
             except Exception:
                 pass
+
+@pytest.fixture(scope="session")
+def client(server_url):
+    client = PetClient(server_url)
+    client.connect()
+    return client
