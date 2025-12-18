@@ -2,17 +2,20 @@
 
 from typing import List, Optional, Tuple, Generator, Dict
 import re
-from copy import deepcopy
 
-import json
-
-from .ast_utils import list_dependencies, parse_about, parse_loadpath
-from .parser import AbstractParser, Step, Position, Range, Element, Source, Dependency, extract_subtext, move_position, Theorem, ParserError
-from ..inference.client import PetClient, ClientError
 from pytanque.protocol import State
 
+from .utils.ast import list_dependencies
+from .utils.message import parse_about, parse_loadpath
+from .utils.position import extract_subtext, move_position
+from .utils.toc import merge_toc_element
 
-class TinyRocqParser(AbstractParser):
+from .parser import Step, Position, Range, Element, Source, Dependency, Theorem, ParserError
+from ..inference.client import PetClient, ClientError
+
+
+
+class RocqParser:
     """Interact with petanque to collect proof structure and metadata."""
 
     def __init__(self, client: PetClient):
@@ -22,6 +25,10 @@ class TinyRocqParser(AbstractParser):
         self.map_logical_physical = self._extract_loadpath()
         self.map_physical_logical = {v: k for k,v in self.map_logical_physical.items()}
     
+    @staticmethod
+    def _extract_blocks(content: str):
+        return re.split(r'(?<=\.\s)', content)
+
     def extract_element(self, state: State, element: str) -> Optional[Element]:
         substate = self.client.run(state, f'About {element}.')
         if substate.feedback:
@@ -38,11 +45,8 @@ class TinyRocqParser(AbstractParser):
         dependencies = []
         for constant in constants:
             element = self.extract_element(state, constant)
+            dependencies.append(element)
         return dependencies
-
-    @staticmethod
-    def _extract_blocks(content: str):
-        return re.split(r'(?<=\.\s)', content)
 
     def _extract_loadpath(self) -> Dict[str, str]:
         try:
@@ -56,12 +60,12 @@ class TinyRocqParser(AbstractParser):
         buffer = ""
         state = self.client.get_root_state(source.path)
 
-        blocks = TinyRocqParser._extract_blocks(source.content)
+        blocks = RocqParser._extract_blocks(source.content)
         curr_pos = Position(0, 0)
         for block in blocks:
             try:
                 state = self.client.get_state_at_pos(source.path, curr_pos.line-1, curr_pos.character)
-            except ClientError as e:
+            except ClientError:
                 pass
             buffer += block
             try:
@@ -69,7 +73,7 @@ class TinyRocqParser(AbstractParser):
                 yield (curr_pos.line, curr_pos.character, ast)
                 curr_pos = move_position(source.content, curr_pos, len(buffer))
                 buffer = ""
-            except ClientError as e:
+            except ClientError:
                 pass
     
     def extract_proofs(self, source: Source) -> Generator[Tuple[Element, List[str]], None, None]:
@@ -80,7 +84,6 @@ class TinyRocqParser(AbstractParser):
         kind: Optional[str] = None
         range_statement: Optional[Range] = None
         for offset_line, offset_char, entry in ast:
-            extracting_thm = False
             curr_pos = Position(offset_line, offset_char)
             try:
                 node_start_char = entry['loc']['bp']
@@ -90,7 +93,6 @@ class TinyRocqParser(AbstractParser):
                 node_start_pos = move_position(source.content, curr_pos, node_start_char)
                 node_end_pos = move_position(source.content, curr_pos, node_end_char)
                 if content[0] == 'VernacStartTheoremProof':
-                    extracting_thm = True
                     infos = content[2][0][0][0]
                     name = infos['v'][1]
                     kind = content[1][0]
@@ -98,7 +100,6 @@ class TinyRocqParser(AbstractParser):
                     start = node_end_pos
                     range_statement = Range(node_start_pos, node_end_pos)
                 elif content[0] == 'VernacEndProof':
-                    extracting_thm = True
                     end = node_end_pos
                     if not (start and end and thm_name):
                         print(f"Ignore {node_start_pos} in {source.path} (no VernacStartTheoremProof associated).")
@@ -108,10 +109,11 @@ class TinyRocqParser(AbstractParser):
 
                     proof = extract_subtext(source.content, range_proof)
                     statement = extract_subtext(source.content, range_statement)
-                    proof_steps = TinyRocqParser._extract_blocks(proof)
+                    proof_steps = RocqParser._extract_blocks(proof)
 
                     state = self.client.get_state_at_pos(source.path, end.line, end.character)
                     element = self.extract_element(state, thm_name)
+                    assert element.physical_path == source.path, f"Path mismatch between {element.physical_path} and {source.path}"
                     element.content = statement
                     element.kind = kind
                     element.range = range_statement
@@ -121,11 +123,11 @@ class TinyRocqParser(AbstractParser):
                     kind: Optional[str] = None
                     range_statement: Optional[Range] = None
                     yield (element, proof_steps)
-            except (KeyError, TypeError):
+            except (KeyError, TypeError) as e:
                 pass
 
     def compute_theorem(self, element: Element, proof_steps: List[str]) -> Theorem:
-        filepath = element.origin
+        filepath = element.physical_path
         line = element.range.start.line
         character = element.range.start.character
         state = self.client.get_state_at_pos(filepath, line, character)
@@ -146,16 +148,23 @@ class TinyRocqParser(AbstractParser):
         """Read the table of contents for a source file."""
         elements = []       
         toc = self.client.toc(source.path, timeout=120)
-        # for name, elements in toc:
-        #     for element in elements:
-        #         for subelement in self._flatten_element(element):
-        #             found = False
-        #             for detail in ALL_DETAILS:
-        #                 if subelement.detail in detail:
-        #                     found = True
-        #                     break
-        #             if not found:
-        #                 print(subelement.detail)
+        for name, toc_elements in toc:
+            for toc_element in toc_elements:
+                pos_start = element.range.start
+                element_name = element.name.v
+                state = self.client.get_state_at_pos(source.path, pos_start.line, pos_start.character)
+
+                element = self.extract_element(state, element_name)
+                merge_toc_element(element, toc_element)
+                exit()
+                # for subelement in self._flatten_element(element):
+                #     found = False
+                #     for detail in ALL_DETAILS:
+                #         if subelement.detail in detail:
+                #             found = True
+                #             break
+                #     if not found:
+                #         print(subelement.detail)
         elements = toc
         return elements
 
