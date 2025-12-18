@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Dict, Any, List
 import re
 import time
+import signal
+import tempfile
 
 import requests
 
@@ -15,7 +17,7 @@ from ..parser.parser import Source
 class OpamDocker(BaseDocker):
     """Wraps Docker interactions for extracting data from an OPAM switch."""
 
-    def __init__(self, config:OpamConfig, redis_image: str= "redis:latest", redis_port:int = 6379, rebuild=False, kill_clone=False):
+    def __init__(self, config:OpamConfig, redis_image: str= "redis:latest", redis_port:int = 6379, rebuild=False, kill_clone=True):
         """Start or reuse a container built from the given OPAM configuration."""
         super().__init__(config, kill_clone=kill_clone, rebuild=rebuild)
         if kill_clone: self._kill_clone(redis_image)
@@ -26,6 +28,8 @@ class OpamDocker(BaseDocker):
             restart_policy={"Name": "unless-stopped"}
         )
         self.opam_env_path = config.opam_env_path
+        self.config = config
+        self.write_file('/tmp/init.v', '\n')
 
     def install_project(self, project: str, extra_args: str = ""):
         """Install OPAM packages inside the container image."""
@@ -35,6 +39,35 @@ class OpamDocker(BaseDocker):
         code = self._stream_exec(cmd, demux=True)
         if code != 0:
             raise RuntimeError(f"`opam install {project}` failed with exit code {code}")
+
+    def pin_project(self, text: str):
+        cmd = f"sh -lc 'opam pin -y {text}'"
+        code = self._stream_exec(cmd, demux=True)
+        if code != 0:
+            raise RuntimeError(f"`opam pin -y {text}` failed with exit code {code}")
+    
+    def _build_image(self, timeout_install=3600):
+        """Create a container image for the requested packages if needed."""
+        self.container = self.client.containers.run(
+            self.config.base_image,
+            detach=True,
+            tty=False,
+            stdin_open=False,
+            user=self.config.user,
+            command=["sleep", "infinity"],
+            network_mode="host",
+        )
+
+        print('Build Image')
+        signal.signal(signal.SIGALRM, BaseDocker._timeout_handler)
+        signal.alarm(timeout_install)
+        if self.config.opam_pins:
+            self.pin_project(" ".join(self.config.opam_pins))
+        if self.config.opam_packages:
+            self.install_project(" ".join(self.config.opam_packages))
+        signal.alarm(0)
+
+        self.container.commit(self.config.name, self.config.tag)
 
     def start_inference_server(self, port=5000, workers=9, timeout=600, num_pet_server=4, pet_server_start_port=8765, max_ram_per_pet=3072):
         """Launch pet-server inside the container."""
@@ -67,6 +100,13 @@ class OpamDocker(BaseDocker):
         subfiles = self.exec_cmd(f"ls -1 {user_contrib}").splitlines()
         return subfiles
 
+    def extract_source_files_from_folder(self, folder_name: str) -> List[Source]:
+        """List `.v` files shipped with an installed package."""
+        sources_path = os.path.join(self.opam_env_path, "lib/coq/user-contrib/", folder_name)
+        subfiles = self.exec_cmd(f"find {sources_path}").splitlines()
+        filepaths = [os.path.join(sources_path, file) for file in subfiles if file.endswith('.v')]
+        return [self.get_source(filepath) for filepath in filepaths]
+
     def extract_opam_path(self, package_name: str, info_path: Dict[str, str]={}):
         """Resolve the OPAM installation path for a package."""
         opam_show = self.exec_cmd(f"opam show {package_name}")
@@ -76,7 +116,7 @@ class OpamDocker(BaseDocker):
             return info_path[package_name], opam_show
         return match.group(1), opam_show
 
-    def extract_files(self, package_name: str, info_path: Dict[str, str]={}) -> Dict[str, Any]:
+    def extract_source_files_from_package(self, package_name: str, info_path: Dict[str, str]={}) -> Dict[str, Any]:
         """List `.v` files shipped with an installed package."""
         fqn, opam_show = self.extract_opam_path(package_name, info_path)
         user_contrib_path = os.path.join(self.opam_env_path, "lib/coq/user-contrib/")
@@ -84,8 +124,13 @@ class OpamDocker(BaseDocker):
         subfiles = self.exec_cmd(f"find {sources_path}").splitlines()
         return {"fqn": fqn, "package_name": package_name, "root": user_contrib_path, "subfiles": [file for file in subfiles if file.endswith('.v')], "opam_show": opam_show}
 
-    def get_source(self, filepath) -> Source:
+    def get_source(self, filepath: str) -> Source:
         """Return a `Source` dataclass for a file inside the container."""
-        content = self._read_file(filepath)
-        return Source(path=Path(filepath), content=content)
+        content = self.read_file(filepath)
+        return Source(path=filepath, content=content)
     
+    def upload_source(self, content: str) -> Source:
+        """Create a tmp file with content `content` inside the docker and return the correspondince Source object."""
+        tmp_path = tempfile.NamedTemporaryFile().name + '.v'
+        self.write_file(tmp_path, content, create_dir=False)
+        return Source(tmp_path, content)
