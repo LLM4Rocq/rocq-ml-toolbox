@@ -1,72 +1,45 @@
 """Dataclasses and interfaces shared by the parser components."""
-
+from __future__ import annotations
 from abc import ABC, abstractmethod
-from pathlib import Path
-from dataclasses import dataclass, asdict
-
-from typing import List, Dict, Any
-
-@dataclass
-class Position:
-    """Location in a source file."""
-
-    line: int
-    character: int
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Position":
-        """Build a position from a JSON-friendly dictionary."""
-        return cls(line=int(d["line"]), character=int(d["character"]))
-
-@dataclass
-class Range:
-    """Range within a source file."""
-
-    start: Position
-    end: Position
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Range":
-        """Build a range from a JSON-friendly dictionary."""
-        return cls(start=Position.from_dict(d["start"]),
-                   end=Position.from_dict(d["end"]))
+from dataclasses import dataclass
+from pytanque.protocol import Range, Position
+from typing import List, Dict, Any, Tuple, Optional
 
 @dataclass
 class Element:
-    """Theorem or lemma metadata extracted from Coq."""
+    """Element extracted from source file."""
 
     origin: str
     name: str
-    statement: str
+    fqn: str
     range: Range
+    content: Optional[str]=None
+    kind: Optional[str]=None
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Element":
+    def from_json(cls, d: Dict[str, Any]) -> Element:
         """Build an element from a dictionary representation."""
         return cls(
             origin=d["origin"],
             name=d["name"],
-            statement=d["statement"],
-            range=Range.from_dict(d["range"]),
+            range=Range.from_json(d["range"]),
+            content=d.get('content', None),
+            kind=d.get('kind', None)
         )
 
 @dataclass
 class Dependency:
     """Reference to a premise or hypothesis used in a proof step."""
 
-    origin: str
-    name: str
+    element: Element
     range: Range
-    kind: str
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Dependency":
+    def from_json(cls, d: Dict[str, Any]) -> Dependency:
         """Build a dependency from a dictionary representation."""
         return cls(
-            origin=d["origin"],
-            name=d["name"],
-            range=Range.from_dict(d["range"]),
-            kind=d["kind"],
+            element=Element.from_json(d["element"]),
+            range=Range.from_json(d["range"])
         )
 
 @dataclass
@@ -74,53 +47,92 @@ class Step:
     """Single proof step together with its state transitions."""
 
     step: str
-    state_in: Any
-    state_out: Any
+    goals: Any
     dependencies: List[Dependency]
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Step":
+    def from_json(cls, d: Dict[str, Any]) -> Step:
         """Build a proof step from a dictionary representation."""
         return cls(
             step=d["step"],
             state_in=d["state_in"],
             state_out=d["state_out"],
-            dependencies=[Dependency.from_dict(x) for x in d["dependencies"]],
+            dependencies=[Dependency.from_json(x) for x in d["dependencies"]],
+        )
+
+@dataclass
+class Theorem:
+    """Single proof step together with its state transitions."""
+    steps: List[Step]
+    initial_goals: Any
+    element: Element
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> Step:
+        """Build a proof step from a dictionary representation."""
+        return cls(
+            step=d["step"],
+            state_in=d["state_in"],
+            state_out=d["state_out"],
+            dependencies=[Dependency.from_json(x) for x in d["dependencies"]],
         )
 
 @dataclass
 class Source:
-    """Raw Coq source file plus helper accessors."""
+    """Source file plus helper accessors."""
 
-    path: Path
+    path: str
     content: str
-    @property
-    def content_lines(self) -> List[str]:
-        """Return the source as a list of lines."""
-        return self.content.splitlines()
-    
-    def to_dict(self) -> dict:
-        """Serialize the source for JSON output."""
-        d = asdict(self)
-        d["path"] = str(d["path"])
-        return d
-    
+
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Source":
+    def from_json(cls, d: Dict[str, Any]) -> Source:
         """Build a source from a dictionary representation."""
-        p = d.get("path")
         return cls(
-            path=p if isinstance(p, Path) else Path(p),
+            path=d["path"],
             content=d["content"],
         )
 
-class ProofNotFound(Exception):
-    """Raised when a completed proof script cannot be located."""
-    pass
+def pos_to_offset(content: str, p: Position) -> int:
+    lines = content.splitlines(keepends=True)
+    if p.line < 0 or p.line >= len(lines):
+        raise IndexError(f"line out of bounds: {p.line}")
+    offset = sum(len(lines[i]) for i in range(p.line))
+    line_no_nl = lines[p.line].rstrip("\r\n")
+    if p.character < 0 or p.character > len(line_no_nl):
+        raise IndexError(f"character out of bounds: {p.character} on line {p.line}")
+    return offset + p.character
 
-class TimeOut(Exception):
-    """Raised when a parser action takes too long."""
-    pass
+def extract_subtext(content: str, r: Range) -> str:
+    """
+    Extract substring defined by Range (line/character), where:
+      - line is 0-based
+      - character is 0-based index within that line
+      - end is treated as exclusive
+    """
+    start_off = pos_to_offset(content, r.start)
+    end_off = pos_to_offset(content, r.end)
+
+    sliced = content[start_off:end_off]
+    return sliced
+
+def move_position(content: str, pos: Position, length: int) -> Position:
+    """
+    Move a (line, character) position by `offset` characters within `text`.
+    """
+
+    lines = content.splitlines(keepends=True)
+
+    abs_index = pos_to_offset(content, pos) + length
+
+    line = 0
+    char = abs_index
+    for l in lines:
+        if char < len(l):
+            break
+        char -= len(l)
+        line += 1
+
+    return Position(line=line, character=char)
 
 def update_statement(theorem: Element, source: Source):
     """Populate the theorem statement text from its source range."""
@@ -131,6 +143,17 @@ def update_statement(theorem: Element, source: Source):
         theorem.statement = "\n".join(lines)
     except IndexError:
         print(f"Failed to extract statement from {theorem} in {source.path}")
+
+class ParserError(Exception):
+    """Base class for parser error"""
+
+class ProofNotFound(ParserError):
+    """Raised when a completed proof script cannot be located."""
+    pass
+
+class TimeOut(ParserError):
+    """Raised when a parser action takes too long."""
+    pass
 
 class AbstractParser(ABC):
     """Interface implemented by proof parsers."""
