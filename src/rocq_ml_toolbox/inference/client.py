@@ -1,20 +1,40 @@
 from typing import Dict, Tuple, List, Any, Optional
+import functools
 
 import requests
 
-from pytanque.client import Params, Response
 from pytanque.protocol import (
-    Response,
     Opts,
     State,
     Goal,
-    Inspect
+    Inspect,
+    TocElement
 )
+
 
 class ClientError(Exception):
     def __init__(self, code, message):
         self.code = code
         self.message = message
+
+def retry(fn):
+    """
+    Retries the decorated method up to `retry` times (default 0) on ClientError
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        retry = int(kwargs.get("retry", 0) or 0)
+        last_exc: Exception | None = None
+
+        for _ in range(retry + 1):  # total attempts = 1 + retry
+            try:
+                return fn(*args, **kwargs)
+            except ClientError as e:
+                last_exc = e
+
+        assert last_exc is not None
+        raise last_exc
+    return wrapper
 
 class PetClient:
     """
@@ -39,7 +59,8 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
     
-    def get_state_at_pos(self, filepath: str, line: int, character: int, failure: bool=False, timeout: int=120) -> State:
+    @retry
+    def get_state_at_pos(self, filepath: str, line: int, character: int, failure: bool=False, timeout: int=120, retry: int=0) -> State:
         """
         Get state at position.
         """
@@ -52,7 +73,8 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
 
-    def run(self, state: State, tactic: str, failure: bool=False, timeout: int=60) -> State:
+    @retry
+    def run(self, state: State, tactic: str, failure: bool=False, timeout: int=60, retry: int=0) -> State:
         """
         Execute a given tactic on the current proof state.
         """
@@ -66,7 +88,8 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
     
-    def goals(self, state: State, pretty=True, failure: bool=False, timeout: int=10) -> List[Goal]:
+    @retry
+    def goals(self, state: State, pretty=True, failure: bool=False, timeout: int=10, retry: int=0) -> List[Goal]:
         """
         Gather goals associated to a state.
         """
@@ -80,7 +103,8 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
 
-    def complete_goals(self, state: State, pretty=True, failure: bool=False, timeout: int=10) -> Dict:
+    @retry
+    def complete_goals(self, state: State, pretty=True, failure: bool=False, timeout: int=10, retry: int=0) -> Dict:
         """
         Gather complete goals associated to a state.
         """
@@ -94,7 +118,8 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
     
-    def premises(self, state: State, failure: bool=False, timeout: int=10) -> Any:
+    @retry
+    def premises(self, state: State, failure: bool=False, timeout: int=10, retry: int=0) -> Any:
         """
         Gather accessible premises (lemmas, definitions) from a state.
         """
@@ -108,7 +133,8 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
     
-    def state_equal(self, st1: State, st2: State, kind=Inspect, failure: bool=False, timeout: int=10) -> bool:
+    @retry
+    def state_equal(self, st1: State, st2: State, kind=Inspect, failure: bool=False, timeout: int=10, retry: int=0) -> bool:
         """
         Check whether state st1 is equal to state st2.
         """
@@ -124,7 +150,8 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
     
-    def state_hash(self, state: State, failure: bool=False, timeout: int=10) -> int:
+    @retry
+    def state_hash(self, state: State, failure: bool=False, timeout: int=10, retry: int=0) -> int:
         """
         Get a hash value for a proof state.
         """
@@ -138,7 +165,8 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
     
-    def toc(self, file: str, failure: bool=False, timeout: int=120) -> list[tuple[str, Any]]:
+    @retry
+    def toc(self, file: str, failure: bool=False, timeout: int=120, retry: int=0) -> List[Tuple[str, List[TocElement]]]:
         """
         Get toc of a file.
         """
@@ -147,11 +175,13 @@ class PetClient:
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             output = response.json()
-            return output['resp']
+            typed_output = [(x[0],[TocElement.from_json(y) for y in x[1]]) for x in output['resp']]
+            return typed_output
         else:
             raise ClientError(response.status_code, response.text)
     
-    def ast(self, state: State, text: str, failure: bool=False, timeout: int=10) -> Dict:
+    @retry
+    def ast(self, state: State, text: str, failure: bool=False, timeout: int=10, retry: int=0) -> Dict:
         """
         Get ast of a command parsed at a state.
         """
@@ -165,7 +195,8 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
     
-    def ast_at_pos(self, file: str, line: int, character: int, failure: bool=False, timeout: int=10) -> Dict:
+    @retry
+    def ast_at_pos(self, file: str, line: int, character: int, failure: bool=False, timeout: int=10, retry: int=0) -> Dict:
         """
         Get ast at a specified position in a file.
         """
@@ -178,7 +209,8 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
     
-    def get_root_state(self, file: str, opts: Optional[Opts]=None, failure: bool=False, timeout: int=10) -> State:
+    @retry
+    def get_root_state(self, file: str, opts: Optional[Opts]=None, failure: bool=False, timeout: int=10, retry: int=0) -> State:
         """
         Get root state of a document.
         """
@@ -192,7 +224,8 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
     
-    def list_notations_in_statement(self, state: State, statement: str, failure: bool=False, timeout: int=10) -> list[Dict]:
+    @retry
+    def list_notations_in_statement(self, state: State, statement: str, failure: bool=False, timeout: int=10, retry: int=0) -> list[Dict]:
         """
         Get the list of notations appearing in a theorem/lemma statement.
         """
@@ -206,7 +239,8 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
     
-    def start(self, file: str, thm: str, pre_commands: Optional[str]=None, opts: Optional[Opts]=None, failure: bool=False, timeout: int=10) -> State:
+    @retry
+    def start(self, file: str, thm: str, pre_commands: Optional[str]=None, opts: Optional[Opts]=None, failure: bool=False, timeout: int=10, retry: int=0) -> State:
         """
         Start a proof session for a specific theorem in a Coq/Rocq file.
         """
@@ -220,6 +254,7 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
 
+    # @retry
     # def query(self, params: Params, size: int=4096, failure: bool=False, timeout: int=10) -> Response:
     #     """
     #     Send a low-level JSON-RPC query to the server.
