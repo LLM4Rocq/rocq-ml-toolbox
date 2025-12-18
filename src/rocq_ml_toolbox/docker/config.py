@@ -23,5 +23,6 @@ class DockerConfig:
 class OpamConfig(DockerConfig):
     """Configuration for building an Opam Docker image."""
     opam_env_path: str
-    packages: list[str]
+    opam_pins: list[str]
+    opam_packages: list[str]
     info_path: Dict[str, str] = field(default_factory=dict)
