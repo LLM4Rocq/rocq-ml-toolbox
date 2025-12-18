@@ -1,86 +1,7 @@
-from enum import StrEnum
 from typing import Optional, Dict
 import re
 
-from .parser import Dependency, Range, Position, Tuple, Element, ParserError
-
-class NotationDetail(StrEnum):
-    NOTATION = "Notation"
-    TACTICNOTATION = "Tactic Notation"
-
-class TacticDetail(StrEnum):
-    TACTIC = "Tactic"
-
-class InductiveDetail(StrEnum):
-    INDUCTIVE = "Inductive"
-    COINDUCTIVE = "CoInductive"
-    VARIANT = "Variant"
-    RECORD = "Record"
-    STRUCTURE = "Structure"
-    CLASS = "Class"
-
-class AssumptionDetail(StrEnum):
-    VARIABLE = "Variable"
-    AXIOM = "Axiom"
-    PARAMETER = "Parameter"
-    CONTEXT = "Context"
-
-class DefinitionDetail(StrEnum):
-    DEFINITION = "Definition"
-    COERCION = "Coercion"
-    SUBCLASS = "SubClass"
-    CANONICALSTRUCTURE = "CanonicalStructure"
-    EXAMPLE = "Example"
-    FIXPOINT = "Fixpoint"
-    COFIXPOINT = "CoFixpoint"
-    SCHEME = "Scheme"
-    STRUCTURECOMPONENT = "StructureComponent"
-    IDENTITYCOERCION = "IdentityCoercion"
-    INSTANCE = "Instance"
-    METHOD = "Method"
-    LET = "Let"
-    LETCONTEXT = "LetContext"
-    CONSTRUCTOR = "Constructor"
-    FIELD = "Field"
-
-class TheoremDetail(StrEnum):
-    THEOREM = "Theorem"
-    LEMMA = "Lemma"
-    FACT = "Fact"
-    REMARK = "Remark"
-    PROPERTY = "Property"
-    PROPOSITION = "Proposition"
-    COROLLARY = "Corollary"
-
-ALL_DETAILS = [TheoremDetail, DefinitionDetail, AssumptionDetail, InductiveDetail, NotationDetail, TacticDetail]
-
-def read_keyword(keyword: str, l: list, result: list[str]) -> list[str]:
-    """Collect AST nodes tagged with the given keyword."""
-
-    if isinstance(l, list):
-        if len(l) >= 3 and l[0] == keyword:
-            result.append((l[1], l[2]))
-            l = l[3:]
-
-        for el in l:
-            result = read_keyword(keyword, el, result)
-
-    elif isinstance(l, dict):
-        for el in l.values():
-            result = read_keyword(keyword, el, result)
-
-    return result
-
-def list_dependencies(ast: dict) -> list[str]:
-    """Extract clean dependency names from an AST."""
-    expr = ast["v"]["expr"]
-    raw_dependencies = read_keyword("Ser_Qualid", expr, [])
-
-    dependencies = []
-    for dir_path, name in raw_dependencies:
-        dependencies.append(".".join(map(lambda w: w[1], dir_path[1] + [name])))
-
-    return [dependency for i, dependency in enumerate(dependencies) if not dependency in dependencies[:i]]
+from ..parser import Range, Position, Element, ParserError
 
 def parse_loadpath(text: str) -> dict[str, str]:
     """
@@ -153,23 +74,24 @@ def parse_about(result: str, map_l_p:Dict[str, str], map_p_l:Dict[str, str]) -> 
         return None
     if 'Declared in' in result:
         pattern = (
-            r'Expands to: Constant\s+(?P<fqn>[^,\s]+)\s.*'
+            r'Expands to: (?P<kind>Constant|Constructor)\s+(?P<fqn>[^,\s]+)\s.*'
             r'Declared in\s+(?:File\s+"(?P<file>[^"]+)"|library (?P<lib>[^,]+)), '
             r'line (?P<line>\d+(?:-\d+)?), characters (?P<char>\d+(?:-\d+)?)'
         )
         match = re.search(pattern, result, flags=re.DOTALL)
         if not match:
             raise ParserError(f"Issue when parsing position information from {result}")
-        lib = match.group("lib")
-        origin = match.group("file")
+        logical_path = match.group("lib")
+        physical_path = match.group("file")
         fqn = match.group("fqn")
+        kind = match.group("kind")
 
-        if lib:
-            origin = solve_logical_path(lib, map_l_p)
-            if origin:
-                fqn = f'{origin}.' + fqn.split('.', maxsplit=1)[1]
-        elif origin:
-            lib = solve_physical_path(origin, map_p_l)
+        if logical_path:
+            physical_path = solve_logical_path(logical_path, map_l_p)
+        elif physical_path:
+            logical_path = solve_physical_path(physical_path, map_p_l)
+            if logical_path:
+                fqn = f'{logical_path}.' + fqn.split('.', maxsplit=1)[1]
         
         line_part = match.group('line')
         char_part = match.group('char')
@@ -182,5 +104,5 @@ def parse_about(result: str, map_l_p:Dict[str, str], map_p_l:Dict[str, str]) -> 
             end=Position(line_end, char_end)
         )
         
-        return Element(origin=origin, name=name, fqn=fqn, range=r)
+        return Element(physical_path=physical_path, logical_path=logical_path, name=name, kind=kind, fqn=fqn, range=r)
     return None
