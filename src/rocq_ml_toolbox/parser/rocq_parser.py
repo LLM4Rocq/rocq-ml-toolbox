@@ -149,6 +149,8 @@ class RocqParser:
         elements = []       
         toc = self.client.toc(source.path, timeout=120)
         for name, toc_elements in toc:
+            if len(toc_elements) == 1:
+                continue
             for toc_element in toc_elements:
                 pos_start = element.range.start
                 element_name = element.name.v
@@ -156,7 +158,7 @@ class RocqParser:
 
                 element = self.extract_element(state, element_name)
                 merge_toc_element(element, toc_element)
-                exit()
+            exit()
                 # for subelement in self._flatten_element(element):
                 #     found = False
                 #     for detail in ALL_DETAILS:
