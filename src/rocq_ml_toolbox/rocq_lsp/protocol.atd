@@ -1,0 +1,18 @@
+<python text="from pytanque.protocol import Range">
+
+type range <ocaml from="protocol.atd" t="range"> = abstract
+
+type ranged_span = {
+    range: range;
+    ?span: string option;
+}
+
+type completion_status = {
+    status: string list;
+    range: range;
+}
+
+type fleche_document = {
+    spans: ranged_span list;
+    completed: completion_status;
+}
