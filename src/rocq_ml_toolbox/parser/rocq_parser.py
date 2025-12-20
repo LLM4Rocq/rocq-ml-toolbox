@@ -1,16 +1,16 @@
 """Tiny Rocq parser that replays proofs and records dependencies."""
 
-from typing import List, Optional, Tuple, Generator, Dict
+from typing import List, Optional, Tuple, Generator, Dict, Union
 import re
+import json
 
-from pytanque.protocol import State
+from pytanque.protocol import State, TocElement
 
 from .utils.ast import list_dependencies
-from .utils.message import parse_about, parse_loadpath
+from .utils.message import parse_about, parse_loadpath, solve_physical_path
 from .utils.position import extract_subtext, move_position
-from .utils.toc import merge_toc_element
 
-from .parser import Step, Position, Range, Element, Source, Dependency, Theorem, ParserError
+from .parser import Step, Position, Range, Element, Source, Dependency, Theorem, ParserError, Notation
 from ..inference.client import PetClient, ClientError
 
 
@@ -25,18 +25,24 @@ class RocqParser:
         self.map_logical_physical = self._extract_loadpath()
         self.map_physical_logical = {v: k for k,v in self.map_logical_physical.items()}
     
+    def add_logical_path(self, source: Source):
+        source.logical_path = solve_physical_path(source.path, self.map_physical_logical)
+
     @staticmethod
     def _extract_blocks(content: str):
         return re.split(r'(?<=\.\s)', content)
 
-    def extract_element(self, state: State, element: str) -> Optional[Element]:
-        substate = self.client.run(state, f'About {element}.')
+    def extract_element(self, state: State, element: str, timeout: int=30, retry=1, is_notation=False) -> Optional[Element]:
+        if is_notation:
+            substate = self.client.run(state, f'About "{element}".', timeout=timeout, retry=retry)
+        else:
+            substate = self.client.run(state, f'About {element}.', timeout=timeout, retry=retry)
         if substate.feedback:
             result = substate.feedback[0][1]
             return parse_about(result, self.map_logical_physical, self.map_physical_logical)
         return None
 
-    def extract_dependencies(self, state: State, tactic: str) -> List[Dependency]:
+    def extract_dependencies(self, state: State, tactic: str, timeout: int=30, retry=1) -> List[Dependency]:
         ast = self.client.ast(state, tactic)
         if ast:
             constants = list_dependencies(ast)
@@ -44,40 +50,44 @@ class RocqParser:
             constants = []
         dependencies = []
         for constant in constants:
-            element = self.extract_element(state, constant)
-            dependencies.append(element)
+            element = self.extract_element(state, constant, timeout=timeout, retry=retry)
+            if element:
+                dependencies.append(element)
         return dependencies
 
-    def _extract_loadpath(self) -> Dict[str, str]:
+    def _extract_loadpath(self, timeout: int=30, retry=1) -> Dict[str, str]:
         try:
             state = self.client.get_root_state('/tmp/init.v')
         except ClientError:
             raise ParserError('Missing /tmp/init.v file.')
-        result = self.client.run(state, 'Print LoadPath.')
+        result = self.client.run(state, 'Print LoadPath.', timeout=timeout, retry=retry)
         return parse_loadpath(result.feedback[0][1])
 
-    def extract_ast(self, source: Source) -> Generator[Tuple[int, int, dict], None, None]:
+    def extract_ast(self, source: Source, timeout: int=120, retry=1) -> Generator[Tuple[int, int, dict], None, None]:
         buffer = ""
-        state = self.client.get_root_state(source.path)
+        state = self.client.get_root_state(source.path, timeout=timeout, retry=retry)
 
         blocks = RocqParser._extract_blocks(source.content)
         curr_pos = Position(0, 0)
         for block in blocks:
             try:
-                state = self.client.get_state_at_pos(source.path, curr_pos.line-1, curr_pos.character)
+                state = self.client.get_state_at_pos(source.path, curr_pos.line, curr_pos.character, timeout=timeout, retry=retry)
             except ClientError:
                 pass
+            except Exception as e:
+                print(type(e))
+                exit()
             buffer += block
             try:
-                ast = self.client.ast(state, buffer)
+                ast = self.client.ast(state, buffer, timeout=timeout, retry=retry)
                 yield (curr_pos.line, curr_pos.character, ast)
                 curr_pos = move_position(source.content, curr_pos, len(buffer))
                 buffer = ""
             except ClientError:
                 pass
     
-    def extract_proofs(self, source: Source) -> Generator[Tuple[Element, List[str]], None, None]:
-        ast = self.extract_ast(source)
+    def extract_proofs(self, source: Source, timeout: int=120, retry=1) -> Generator[Tuple[Element, Range, List[str]], None, None]:
+        ast = self.extract_ast(source, timeout=timeout, retry=retry)
 
         thm_name: Optional[str] = None
         start: Optional[Position] = None
@@ -92,82 +102,130 @@ class RocqParser:
 
                 node_start_pos = move_position(source.content, curr_pos, node_start_char)
                 node_end_pos = move_position(source.content, curr_pos, node_end_char)
+                # TODO: Extract Instance proof
                 if content[0] == 'VernacStartTheoremProof':
                     infos = content[2][0][0][0]
                     name = infos['v'][1]
+                    print(f"START PROOF {name}")
                     kind = content[1][0]
+                    thm_name = name
+                    start = node_end_pos
+                    range_statement = Range(node_start_pos, node_end_pos)
+                elif content[0] == 'VernacDefinition':
+                    infos = content[2][0]
+                    name = infos['v'][1][1]
+                    print(f"START DEFINITION {name}")
+                    kind = content[1][1][0]
+                    thm_name = name
+                    start = node_end_pos
+                    range_statement = Range(node_start_pos, node_end_pos)
+                elif content[0] == 'VernacInstance':
+                    infos = content[1][0]
+                    name = infos['v'][1][1]
+                    print(f"START INSTANCE {name}")
+                    kind = 'Instance'
                     thm_name = name
                     start = node_end_pos
                     range_statement = Range(node_start_pos, node_end_pos)
                 elif content[0] == 'VernacEndProof':
                     end = node_end_pos
+                    print(f"END PROOF {name}")
                     if not (start and end and thm_name):
                         print(f"Ignore {node_start_pos} in {source.path} (no VernacStartTheoremProof associated).")
                         continue
-                    
                     range_proof = Range(start, end)
 
                     proof = extract_subtext(source.content, range_proof)
                     statement = extract_subtext(source.content, range_statement)
                     proof_steps = RocqParser._extract_blocks(proof)
 
-                    state = self.client.get_state_at_pos(source.path, end.line, end.character)
-                    element = self.extract_element(state, thm_name)
-                    assert element.physical_path == source.path, f"Path mismatch between {element.physical_path} and {source.path}"
+                    state = self.client.get_state_at_pos(source.path, end.line, end.character, timeout=timeout, retry=retry)
+                    element = self.extract_element(state, thm_name, timeout=timeout, retry=retry)
+                    assert element.path == source.path, f"Path mismatch between {element.path} and {source.path}"
                     element.content = statement
                     element.kind = kind
-                    element.range = range_statement
+                    element.content_range = range_statement
 
                     thm_name: Optional[str] = None
                     start: Optional[Position] = None
                     kind: Optional[str] = None
                     range_statement: Optional[Range] = None
-                    yield (element, proof_steps)
+                    yield (element, range_proof, proof_steps)
             except (KeyError, TypeError) as e:
                 pass
 
-    def compute_theorem(self, element: Element, proof_steps: List[str]) -> Theorem:
-        filepath = element.physical_path
+    def execute_proof(self, element: Element, proof_steps: List[str], timeout: int=120, retry=1) -> Theorem:
+        filepath = element.path
         line = element.range.start.line
         character = element.range.start.character
-        state = self.client.get_state_at_pos(filepath, line, character)
+        state = self.client.get_state_at_pos(filepath, line, character, timeout=timeout, retry=retry)
 
         steps = []
         initial_goals = self.client.goals(state)
         for tactic in proof_steps:
-            dependencies = self.extract_dependencies(state, tactic)
-            state = self.client.run(state, tactic)
-            goals = self.client.goals(state)
+            dependencies = self.extract_dependencies(state, tactic, timeout=timeout, retry=retry)
+            state = self.client.run(state, tactic, timeout=timeout, retry=retry)
+            goals = self.client.goals(state, timeout=timeout, retry=retry)
             step = Step(tactic, goals, dependencies)
             steps.append(step)
         
         assert not goals, "Proof incomplete"
         return Theorem(steps, initial_goals, element)
 
-    def extract_toc(self, source: Source, timeout: int=120) -> List[Element]:
-        """Read the table of contents for a source file."""
-        elements = []       
-        toc = self.client.toc(source.path, timeout=120)
-        for name, toc_elements in toc:
-            if len(toc_elements) == 1:
-                continue
-            for toc_element in toc_elements:
-                pos_start = element.range.start
-                element_name = element.name.v
-                state = self.client.get_state_at_pos(source.path, pos_start.line, pos_start.character)
+    @staticmethod
+    def _name_range_key(name: str, range: Range, offset=0):
+        line_window = f'{range.start.line-offset}-{range.end.line-offset}' if range.start.line != range.end.line else f'{range.start.line-offset}'
+        char_window = f'{range.start.character}-{range.end.character}' if range.start.character != range.end.character else f'{range.start.character}'
+        return f'{name}, line: {line_window}, char: {char_window}'
 
-                element = self.extract_element(state, element_name)
-                merge_toc_element(element, toc_element)
-            exit()
-                # for subelement in self._flatten_element(element):
-                #     found = False
-                #     for detail in ALL_DETAILS:
-                #         if subelement.detail in detail:
-                #             found = True
-                #             break
-                #     if not found:
-                #         print(subelement.detail)
-        elements = toc
+    @staticmethod
+    def _elem_key(element: Element, offset=0) -> str:
+        return RocqParser._name_range_key(element.name, element.content_range, offset=0)
+
+    @staticmethod
+    def _toc_elem_key(toc_elem: TocElement, offset=0) -> str:
+        return RocqParser._name_range_key(toc_elem.name.v, toc_elem.range, offset=0)
+
+    def toc_to_element_tree(self, source: Source, proof_map: Dict[str, Range], toc_element: TocElement) -> Union[Element, Notation]:
+        """
+        Convert a TocElement node (and its TocElement children recursively)
+        into an Element tree using `merge_toc_element` for node conversion.
+        """
+        pos_end = toc_element.range.end
+        toc_key = RocqParser._toc_elem_key(toc_element)
+        if toc_key in proof_map:
+            pos_end = proof_map[toc_key].end
+        state = self.client.get_state_at_pos(source.path, pos_end.line, pos_end.character)
+        # if self.client.goals(state):
+        #     state = self.client.run(state, 'Admitted.')
+        is_notation = toc_element.detail=='Notation'
+        if is_notation:
+            return Notation(toc_element.name, toc_element.range, source.path, source.logical_path)
+        
+        print(toc_element)
+        print(toc_key)
+        print(proof_map.keys())
+        print(toc_key in proof_map)
+        print(pos_end)
+        element = self.extract_element(state, toc_element.name.v, is_notation=is_notation)
+        element.range = toc_element.range
+        element.kind = toc_element.detail
+
+        if toc_element.children:
+            element.children = [self.toc_to_element_tree(source, child) for child in toc_element.children]
+
+        return element
+
+    def extract_toc(self, source: Source, timeout: int=60, retry=1) -> List[List[Union[Element,Notation]]]:
+        """Read the table of contents for a source file."""
+        result = []       
+        toc = self.client.toc(source.path, timeout=timeout, retry=retry)
+        proof_map = {RocqParser._elem_key(element, offset=1): r for element, r, _ in self.extract_proofs(source)}
+        for _, toc_elements in toc:
+            if not toc_elements:
+                continue
+            elements = [self.toc_to_element_tree(source, proof_map, toc_element) for toc_element in toc_elements]
+            result.append(elements)
         return elements
 
     # def _extract_one_feedback(self, state: State):
@@ -233,7 +291,3 @@ class RocqParser:
     #             dependency = self._parse_locate(feedback)
     #             dependencies += dependency
     #     return loadpath, dependencies
-
-    def __call__(self, theorem: Element, source: Source) -> List[Step]:
-        """Extract the proof steps for a single theorem."""
-        return self._extract_proof(theorem, source)
