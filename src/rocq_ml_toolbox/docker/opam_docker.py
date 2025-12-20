@@ -69,7 +69,7 @@ class OpamDocker(BaseDocker):
 
         self.container.commit(self.config.name, self.config.tag)
 
-    def start_inference_server(self, port=5000, workers=9, timeout=600, num_pet_server=4, pet_server_start_port=8765, max_ram_per_pet=3072):
+    def start_inference_server(self, port=5000, workers=9, timeout=30, num_pet_server=4, pet_server_start_port=8765, max_ram_per_pet=3072):
         """Launch pet-server inside the container."""
         self.pet_port = port
         cmd = f"""
@@ -92,7 +92,7 @@ class OpamDocker(BaseDocker):
                 pass
             time.sleep(0.1)
         log = self.exec_cmd("sh -lc 'tail -n +200 /tmp/gunicorn-error.log || true'")
-        raise RuntimeError(f"pet-server failed to start on port {port}.\n{log}")
+        raise RuntimeError(f"rocq-ml-server failed to start on port {port}.\n{log}")
 
     def list_opam_folder(self) -> List[str]:
         "Extract all opam folder"
