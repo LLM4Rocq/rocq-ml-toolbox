@@ -11,6 +11,7 @@ from pytanque.protocol import (
     TocElement
 )
 
+from ..rocq_lsp.protocol import FlecheDocument
 
 class ClientError(Exception):
     def __init__(self, code, message):
@@ -177,6 +178,20 @@ class PetClient:
             output = response.json()
             typed_output = [(x[0],[TocElement.from_json(y) for y in x[1]]) for x in output['resp']]
             return typed_output
+        else:
+            raise ClientError(response.status_code, response.text)
+
+    @retry
+    def get_document(self, path: str, timeout: int=10) -> FlecheDocument:
+        """
+        Get fleche representation of document at path `path`.
+        """
+        url = f"{self.base_url}/get_document"
+        payload = {'path': path, 'timeout': timeout}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            output = response.json()
+            return FlecheDocument.from_json(output)
         else:
             raise ClientError(response.status_code, response.text)
     
