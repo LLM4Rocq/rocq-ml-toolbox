@@ -104,5 +104,5 @@ def parse_about(result: str, map_l_p:Dict[str, str], map_p_l:Dict[str, str]) -> 
             end=Position(line_end, char_end)
         )
         
-        return Element(physical_path=physical_path, logical_path=logical_path, name=name, kind=kind, fqn=fqn, range=r)
+        return Element(path=physical_path, logical_path=logical_path, name=name, kind=kind, fqn=fqn, range=r)
     return None

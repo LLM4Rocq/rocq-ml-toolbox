@@ -53,8 +53,3 @@ class TheoremDetail(StrEnum):
     COROLLARY = "Corollary"
 
 ALL_DETAILS = [TheoremDetail, DefinitionDetail, AssumptionDetail, InductiveDetail, NotationDetail, TacticDetail]
-
-def merge_toc_element(element: Element, toc_element:TocElement):
-    name = toc_element.name.v
-    range = toc_element.range
-    element = Element(name)
