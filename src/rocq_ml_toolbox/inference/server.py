@@ -4,13 +4,15 @@ import logging
 
 from flask import Flask, request, jsonify, current_app
 from pytanque import State, PetanqueError
-from pytanque.client import Params
 from pytanque.protocol import (
     Opts,
     State,
     Inspect
 )
 
+from ..rocq_lsp.client import LspClient
+from ..rocq_lsp.structs import TextDocumentItem
+from ..parser.utils.position import extract_subtext
 from .sessions import SessionManager, UnresponsiveError
 
 app = Flask(__name__)
@@ -390,6 +392,25 @@ def start():
 #     resp = session_manager.start(**data)
 #     output = {"resp": resp.to_json()}
 #     return jsonify(output), 200
+
+@app.route("/get_document", methods=["POST"])
+def get_ast():
+    """
+    Extract fleche document representation from document at `path`.
+    """
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["path"])
+    if err is not None:
+        return err
+    path = data["path"]
+    with LspClient() as client:
+        item = TextDocumentItem(path)
+        client.initialize(item)
+        client.didOpen(item)
+        fleche_document = client.getDocument(item)
+    for ranged_span in fleche_document.spans:
+        ranged_span.span = extract_subtext(item.text, ranged_span.range)
+    return jsonify(fleche_document.to_json()), 200
 
 @app.route("/get_session", methods=["POST"])
 def get_session():
