@@ -11,9 +11,7 @@ import uuid
 import signal
 
 from pytanque import Pytanque, PetanqueError
-from pytanque.client import Params
 from pytanque.protocol import (
-    Response,
     Opts,
     State,
     Goal,
@@ -152,6 +150,7 @@ class SessionManager:
             "filepath": filepath,
             "line": line,
             "character": character,
+            "generation": generation,
             "pet_idx": pet_idx
         })
         raw = self.redis_client.get(cache_state_key(id_str))
