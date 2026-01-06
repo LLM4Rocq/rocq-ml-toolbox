@@ -1,4 +1,5 @@
-from typing import Dict, Tuple, List, Any, Optional
+from __future__ import annotations
+from typing import Dict, Tuple, List, Any, Optional, Set
 import functools
 
 import requests
@@ -37,6 +38,23 @@ def retry(fn):
         raise last_exc
     return wrapper
 
+def check_states(fn):
+    """
+    Ensure that all State arguments passed to a function are alive.
+    """
+    @functools.wraps(fn)
+    def wrapper(self: PetClient, *args, **kwargs):
+        for arg in args:
+            if isinstance(arg, State):
+                self._check_state(arg)
+
+        for arg in kwargs.values():
+            if isinstance(arg, State):
+                self._check_state(arg)
+
+        return fn(self, *args, **kwargs)
+    return wrapper
+
 class PetClient:
     """
     A simple client API for interacting with the pet Flask server.
@@ -47,6 +65,8 @@ class PetClient:
         """
         self.base_url = base_url.rstrip("/")
         self.session_id: str = None
+        self.alive_states: Set[State] = set() # keep track of alive intermediate states (run)
+        self.dead_states: Set[State] = set() # keep track of dead intermediate states (each time get_state, or start is called, it killed all previous intermediate states)
 
     def connect(self):
         """
@@ -60,6 +80,19 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
     
+    def _check_state(self, state: State):
+        state_id = state.to_json_string()
+        if state_id in self.dead_states:
+            raise ClientError(400, 'The given state is dead, do you try to proof simultaneously multiple proofs?')
+
+    def _reset_states(self):
+        self.dead_states = self.alive_states | self.dead_states
+        self.alive_states = set()
+    
+    def _add_state(self, state: State):
+        state_id = state.to_json_string()
+        self.alive_states.add(state_id)
+
     @retry
     def get_state_at_pos(self, filepath: str, line: int, character: int, failure: bool=False, timeout: int=120, retry: int=0) -> State:
         """
@@ -70,11 +103,13 @@ class PetClient:
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             output = response.json()
+            self._reset_states()
             return State.from_json(output['resp'])
         else:
             raise ClientError(response.status_code, response.text)
 
     @retry
+    @check_states
     def run(self, state: State, tactic: str, failure: bool=False, timeout: int=60, retry: int=0) -> State:
         """
         Execute a given tactic on the current proof state.
@@ -85,11 +120,14 @@ class PetClient:
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             output = response.json()
-            return State.from_json(output['resp'])
+            state = State.from_json(output['resp'])
+            self._add_state(state)
+            return state
         else:
             raise ClientError(response.status_code, response.text)
     
     @retry
+    @check_states
     def goals(self, state: State, pretty=True, failure: bool=False, timeout: int=10, retry: int=0) -> List[Goal]:
         """
         Gather goals associated to a state.
@@ -105,6 +143,7 @@ class PetClient:
             raise ClientError(response.status_code, response.text)
 
     @retry
+    @check_states
     def complete_goals(self, state: State, pretty=True, failure: bool=False, timeout: int=10, retry: int=0) -> Dict:
         """
         Gather complete goals associated to a state.
@@ -120,6 +159,7 @@ class PetClient:
             raise ClientError(response.status_code, response.text)
     
     @retry
+    @check_states
     def premises(self, state: State, failure: bool=False, timeout: int=10, retry: int=0) -> Any:
         """
         Gather accessible premises (lemmas, definitions) from a state.
@@ -135,6 +175,7 @@ class PetClient:
             raise ClientError(response.status_code, response.text)
     
     @retry
+    @check_states
     def state_equal(self, st1: State, st2: State, kind=Inspect, failure: bool=False, timeout: int=10, retry: int=0) -> bool:
         """
         Check whether state st1 is equal to state st2.
@@ -142,6 +183,7 @@ class PetClient:
         url = f"{self.base_url}/state_equal"
         st1 = st1.to_json()
         st2 = st2.to_json()
+
         kind = kind.to_json()
         payload = {'session_id': self.session_id, 'st1': st1, 'st2': st2, 'kind': kind,'failure': failure, 'timeout': timeout}
         response = requests.post(url, json=payload)
@@ -152,12 +194,14 @@ class PetClient:
             raise ClientError(response.status_code, response.text)
     
     @retry
+    @check_states
     def state_hash(self, state: State, failure: bool=False, timeout: int=10, retry: int=0) -> int:
         """
         Get a hash value for a proof state.
         """
         url = f"{self.base_url}/state_hash"
         state = state.to_json()
+
         payload = {'session_id': self.session_id, 'state': state, 'failure': failure, 'timeout': timeout}
         response = requests.post(url, json=payload)
         if response.status_code == 200:
@@ -196,6 +240,7 @@ class PetClient:
             raise ClientError(response.status_code, response.text)
     
     @retry
+    @check_states
     def ast(self, state: State, text: str, failure: bool=False, timeout: int=10, retry: int=0) -> Dict:
         """
         Get ast of a command parsed at a state.
@@ -240,6 +285,7 @@ class PetClient:
             raise ClientError(response.status_code, response.text)
     
     @retry
+    @check_states
     def list_notations_in_statement(self, state: State, statement: str, failure: bool=False, timeout: int=10, retry: int=0) -> list[Dict]:
         """
         Get the list of notations appearing in a theorem/lemma statement.
@@ -265,6 +311,7 @@ class PetClient:
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             output = response.json()
+            self._reset_states()
             return State.from_json(output['resp'])
         else:
             raise ClientError(response.status_code, response.text)
