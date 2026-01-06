@@ -1,4 +1,4 @@
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 import re
 
 from ..parser import Range, Position, Element, ParserError
@@ -67,14 +67,14 @@ def solve_physical_path(physical_path: str, map_paths:Dict[str, str]) -> Optiona
             return l_path + f'.{child}'
     return None
 
-def parse_about(result: str, map_l_p:Dict[str, str], map_p_l:Dict[str, str]) -> Optional[Element]:
+def parse_about(result: str, map_l_p:Dict[str, str], map_p_l:Dict[str, str]) -> Tuple[Optional[Element], bool]:
     """Parse `About` feedback into a tuple `(path, range)`. Path corresponds to the path of the dependency (if None: current file)."""
     name = result.split(' :')[0]
     if "Hypothesis of the goal context." in result:
-        return None
+        return None, False
     if 'Declared in' in result:
         pattern = (
-            r'Expands to: (?P<kind>Constant|Constructor|Inductive)\s+(?P<fqn>[^,\s]+)\s.*'
+            r'Expands to: (?P<kind>Constant|Constructor|Inductive|Notation)\s+(?P<fqn>[^,\s]+)\s.*'
             r'Declared in\s+(?:File\s+"(?P<file>[^"]+)"|library (?P<lib>[^,]+)), '
             r'line (?P<line>\d+(?:-\d+)?), characters (?P<char>\d+(?:-\d+)?)'
         )
@@ -85,11 +85,13 @@ def parse_about(result: str, map_l_p:Dict[str, str], map_p_l:Dict[str, str]) -> 
         physical_path = match.group("file")
         fqn = match.group("fqn")
         kind = match.group("kind")
+        is_local = False
 
         if logical_path:
             physical_path = solve_logical_path(logical_path, map_l_p)
         elif physical_path:
             logical_path = solve_physical_path(physical_path, map_p_l)
+            is_local = True
             if logical_path:
                 fqn = f'{logical_path}.' + fqn.split('.', maxsplit=1)[1]
         
@@ -104,5 +106,5 @@ def parse_about(result: str, map_l_p:Dict[str, str], map_p_l:Dict[str, str]) -> 
             end=Position(line_end, char_end)
         )
         
-        return Element(path=physical_path, logical_path=logical_path, name=name, kind=kind, fqn=fqn, range=r)
-    return None
+        return Element(path=physical_path, logical_path=logical_path, name=name, kind=kind, fqn=fqn, range=r), is_local
+    return None, False
