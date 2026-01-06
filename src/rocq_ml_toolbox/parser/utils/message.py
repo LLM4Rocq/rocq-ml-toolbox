@@ -74,7 +74,7 @@ def parse_about(result: str, map_l_p:Dict[str, str], map_p_l:Dict[str, str]) -> 
         return None
     if 'Declared in' in result:
         pattern = (
-            r'Expands to: (?P<kind>Constant|Constructor)\s+(?P<fqn>[^,\s]+)\s.*'
+            r'Expands to: (?P<kind>Constant|Constructor|Inductive)\s+(?P<fqn>[^,\s]+)\s.*'
             r'Declared in\s+(?:File\s+"(?P<file>[^"]+)"|library (?P<lib>[^,]+)), '
             r'line (?P<line>\d+(?:-\d+)?), characters (?P<char>\d+(?:-\d+)?)'
         )
