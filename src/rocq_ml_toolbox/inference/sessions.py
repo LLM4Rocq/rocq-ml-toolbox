@@ -35,27 +35,6 @@ from .redis_keys import (
 )
 
 @dataclass
-class CacheState:
-    pet_idx: int
-    generation: int
-    state: State
-
-    @classmethod
-    def from_json(cls, raw: Dict[str, Any]) -> CacheState:
-        return cls(
-            pet_idx=raw['pet_idx'],
-            generation=raw['generation'],
-            state=State.from_json(raw['state'])
-        )
-
-    def to_json(self) -> dict:
-        return {
-            "pet_idx": self.pet_idx,
-            "generation": self.generation,
-            "state": self.state.to_json()
-        }
-
-@dataclass
 class Session:
     session_id: str
     pet_idx: int                       # which pet-server index (0..num_pet_server-1)
@@ -146,6 +125,7 @@ class SessionManager:
     def _get_state_at_pos(self, pet_idx: int, filepath: str, line: int, character: int) -> State:
         """get_state_at_pos wrapper to cache state."""
         worker = self._get_worker(pet_idx)
+        generation = self.get_generation(pet_idx)
         id_str = str({
             "filepath": filepath,
             "line": line,
@@ -154,25 +134,21 @@ class SessionManager:
             "pet_idx": pet_idx
         })
         raw = self.redis_client.get(cache_state_key(id_str))
-        generation = self.get_generation(pet_idx)
     
         state: Optional[State] = None
         if not raw:
             state = worker.get_state_at_pos(filepath, line, character)
+            state.generation = generation
         else:
             data = json.loads(raw)
-            cache_state = CacheState.from_json(data)
+            cache_state = State.from_json(data)
             if cache_state.generation != generation:
                 state = worker.get_state_at_pos(filepath, line, character)
+                state.generation = generation
             else:
-                state = cache_state.state
-        
-        cache_state = {
-            "pet_idx": pet_idx,
-            "generation": generation,
-            "state": state.to_json()
-        }
-        self.redis_client.set(cache_state_key(id_str), json.dumps(cache_state))
+                state = cache_state
+
+        self.redis_client.set(cache_state_key(id_str), json.dumps(state.to_json()))
         return state
         
 
@@ -293,7 +269,8 @@ class SessionManager:
                     signal.alarm(timeout_run)
                     lock.extend(timeout_run+self.timeout_eps, replace_ttl=True)
                     state = worker.run(state, tactic, verbose=False, timeout=timeout_run)
-                    sess.mapping_state[old_state.hash] = state
+                    old_state_str = old_state.to_json_string()
+                    sess.mapping_state[old_state_str] = state
             finally:
                 signal.alarm(0)
         sess.generation = current_generation
@@ -337,13 +314,14 @@ class SessionManager:
             lock = self.acquire_pet_lock(pet_idx, timeout=self.timeout_ok + self.timeout_eps)
             self.ensure_pet_ok(pet_idx, timeout=self.timeout_ok)
             sess = self.get_session(session_id)
-            if state:
-                sess = self.check_session(sess, lock) # refresh after potential replay
-
-                if state.hash in sess.mapping_state:
-                    state = sess.mapping_state[state.hash]
 
             worker = self._get_worker(sess.pet_idx)
+
+            if state:
+                sess = self.check_session(sess, lock) # refresh after potential replay
+                state_str = state.to_json_string()
+                if state_str in sess.mapping_state:
+                    state = sess.mapping_state[state_str]
 
             if failure:
                 self._failure_simulation()
