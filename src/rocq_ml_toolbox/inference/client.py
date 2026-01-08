@@ -147,7 +147,7 @@ class PetClient:
 
     @retry
     @check_states
-    def complete_goals(self, state: State, pretty=True, failure: bool=False, timeout: int=10, retry: int=0) -> Dict:
+    def complete_goals(self, state: State, pretty=True, failure: bool=False, timeout: int=10, retry: int=0) -> GoalsResponse:
         """
         Gather complete goals associated to a state.
         """
