@@ -94,12 +94,14 @@ class PetClient:
         self.alive_states.add(state_id)
 
     @retry
-    def get_state_at_pos(self, filepath: str, line: int, character: int, failure: bool=False, timeout: int=120, retry: int=0) -> State:
+    def get_state_at_pos(self, filepath: str, line: int, character: int, opts: Optional[Opts]=None, failure: bool=False, timeout: int=120, retry: int=0) -> State:
         """
         Get state at position.
         """
         url = f"{self.base_url}/get_state_at_pos"
-        payload = {'session_id': self.session_id, 'filepath': filepath, 'line': line, 'character': character, 'failure': failure, 'timeout': timeout}
+        if opts:
+            opts = opts.to_json()
+        payload = {'session_id': self.session_id, 'filepath': filepath, 'line': line, 'character': character, 'failure': failure, 'timeout': timeout, 'opts': opts}
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             output = response.json()
@@ -154,7 +156,7 @@ class PetClient:
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             output = response.json()
-            return output['resp']
+            return [Goal.from_json(goal) for goal in output['resp']]
         else:
             raise ClientError(response.status_code, response.text)
     
