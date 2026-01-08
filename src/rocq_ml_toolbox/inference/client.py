@@ -9,7 +9,8 @@ from pytanque.protocol import (
     State,
     Goal,
     Inspect,
-    TocElement
+    TocElement,
+    GoalsResponse
 )
 
 from ..rocq_lsp.protocol import FlecheDocument
@@ -156,7 +157,7 @@ class PetClient:
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             output = response.json()
-            return [Goal.from_json(goal) for goal in output['resp']]
+            return GoalsResponse.from_json(output['resp'])
         else:
             raise ClientError(response.status_code, response.text)
     
