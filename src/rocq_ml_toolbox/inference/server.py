@@ -131,6 +131,8 @@ def get_state_at_pos():
     if err is not None:
         return err
 
+    if data['opts']:
+        data['opts'] = Opts.from_json(data['opts'])
     state = session_manager.get_state_at_pos(**data)
     output = {"resp": state.to_json()}
     return jsonify(output), 200
