@@ -122,7 +122,7 @@ class SessionManager:
             return 0
         return int(data)
 
-    def _get_state_at_pos(self, pet_idx: int, filepath: str, line: int, character: int) -> State:
+    def _get_state_at_pos(self, pet_idx: int, filepath: str, line: int, character: int, opts: Optional[Opts]=None) -> State:
         """get_state_at_pos wrapper to cache state."""
         worker = self._get_worker(pet_idx)
         generation = self.get_generation(pet_idx)
@@ -137,13 +137,13 @@ class SessionManager:
     
         state: Optional[State] = None
         if not raw:
-            state = worker.get_state_at_pos(filepath, line, character)
+            state = worker.get_state_at_pos(filepath, line, character, opts)
             state.generation = generation
         else:
             data = json.loads(raw)
             cache_state = State.from_json(data)
             if cache_state.generation != generation:
-                state = worker.get_state_at_pos(filepath, line, character)
+                state = worker.get_state_at_pos(filepath, line, character, opts)
                 state.generation = generation
             else:
                 state = cache_state
@@ -365,13 +365,13 @@ class SessionManager:
             with self._alarm(timeout):
                 return op(sess, worker, lock, new_state)
 
-    def get_state_at_pos(self, session_id: str, filepath: str, line: int, character: int, failure: bool=False, timeout=120) -> State:
+    def get_state_at_pos(self, session_id: str, filepath: str, line: int, character: int, opts: Optional[Opts]=None, failure: bool=False, timeout=120) -> State:
         """Start a theorem proving session for the theorem at the given position. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state: Optional[State]):
             sess.generation = self.get_generation(sess.pet_idx)
 
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            state = self._get_state_at_pos(sess.pet_idx, filepath, line, character)
+            state = self._get_state_at_pos(sess.pet_idx, filepath, line, character, opts)
             if sess.tactics:
                 self.archive_session(sess)
             
