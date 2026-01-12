@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Tuple
 
 def read_keyword(keyword: str, l: List, result: List[str]) -> List[str]:
     """Collect AST nodes tagged with the given keyword."""
@@ -27,3 +27,4 @@ def list_dependencies(ast: dict) -> List[str]:
         dependencies.append(".".join(map(lambda w: w[1], dir_path[1] + [name])))
 
     return [dependency for i, dependency in enumerate(dependencies) if not dependency in dependencies[:i]]
+
