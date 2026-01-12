@@ -4,67 +4,21 @@ from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Union
 
 from pytanque.protocol import Range, Position
-
-@dataclass
-class Notation:
-    """Notation extracted from source file."""
-
-    name: str
-    range: Range
-    path: Optional[str]=None
-    logical_path: Optional[str]=None
-    children: Optional[Union[Element, Notation]]=None
-
-    @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> Element:
-        """Build an element from a dictionary representation."""
-        return cls(
-            path=d.get('path', None),
-            logical_path=d.get('logical_path', None),
-            name=d["name"],
-            range=Range.from_json(d["range"]),
-            children=d.get('children', None)
-        )
-
-@dataclass
-class Element:
-    """Element extracted from source file."""
-
-    name: str
-    fqn: str
-    range: Range
-    content: Optional[str]=None
-    content_range: Optional[Range]=None
-    kind: Optional[str]=None
-    path: Optional[str]=None
-    logical_path: Optional[str]=None
-    children: Optional[Union[Element, Notation]]=None
-
-    @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> Element:
-        """Build an element from a dictionary representation."""
-        return cls(
-            path=d.get('path', None),
-            logical_path=d.get('logical_path', None),
-            name=d["name"],
-            range=Range.from_json(d["range"]),
-            content=d.get('content', None),
-            kind=d.get('kind', None),
-            children=d.get('children', None)
-        )
+from .ast.model import VernacElement
 
 @dataclass
 class Dependency:
     """Reference to a premise or hypothesis used in a proof step."""
 
-    element: Element
+    element: VernacElement
     range: Range
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> Dependency:
         """Build a dependency from a dictionary representation."""
+        raise Exception("from_json not implemented for VernacElement")
         return cls(
-            element=Element.from_json(d["element"]),
+            element=VernacElement.from_json(d["element"]),
             range=Range.from_json(d["range"])
         )
 
@@ -91,7 +45,7 @@ class Theorem:
     """Single proof step together with its state transitions."""
     steps: List[Step]
     initial_goals: Any
-    element: Element
+    element: VernacElement
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> Step:
@@ -116,6 +70,16 @@ class Source:
             path=d["path"],
             content=d["content"],
             logical_path=d["logical_path"],
+        )
+
+    @classmethod
+    def from_local_path(cls, path: str) -> Source:
+        """Build a source from a local path."""
+        with open(path, 'r') as file:
+            content = file.read()
+        return cls(
+            path=path,
+            content=content
         )
 
 class ParserError(Exception):
