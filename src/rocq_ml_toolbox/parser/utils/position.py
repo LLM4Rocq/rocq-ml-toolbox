@@ -10,6 +10,26 @@ def pos_to_offset(content: str, p: Position) -> int:
         raise ParserError(f"character out of bounds: {p.character} on line {p.line}")
     return offset + p.character
 
+def offset_to_pos(content: str, offset: int) -> Position:
+    if offset < 0:
+        raise ParserError(f"offset out of bounds: {offset}")
+
+    lines = content.splitlines(keepends=True)
+
+    remaining = offset
+    for i, line in enumerate(lines):
+        if remaining <= len(line):
+            line_no_nl = line.rstrip("\r\n")
+            character = min(remaining, len(line_no_nl))
+            return Position(line=i, character=character)
+        remaining -= len(line)
+
+    if lines:
+        last_line = lines[-1].rstrip("\r\n")
+        return Position(line=len(lines) - 1, character=len(last_line))
+    else:
+        return Position(line=0, character=0)
+
 def extract_subtext(content: str, r: Range) -> str:
     """
     Extract substring defined by Range (line/character), where:
