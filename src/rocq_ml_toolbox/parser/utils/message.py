@@ -1,7 +1,10 @@
 from typing import Optional, Dict, Tuple
 import re
 
-from ..parser import Range, Position, Element, ParserError
+from ..parser import Position, ParserError, Source, Range
+from .position import pos_to_offset
+from ..ast.vernac import VernacElement, VernacKind
+from ..ast.model import Span
 
 def parse_loadpath(text: str) -> dict[str, str]:
     """
@@ -67,7 +70,7 @@ def solve_physical_path(physical_path: str, map_paths:Dict[str, str]) -> Optiona
             return l_path + f'.{child}'
     return None
 
-def parse_about(result: str, map_l_p:Dict[str, str], map_p_l:Dict[str, str]) -> Tuple[Optional[Element], bool]:
+def parse_about(result: str, map_l_p:Dict[str, str], map_p_l:Dict[str, str]) -> Tuple[Optional[VernacElement], bool]:
     """Parse `About` feedback into a tuple `(path, range)`. Path corresponds to the path of the dependency (if None: current file)."""
     name = result.split(' :')[0]
     if "Hypothesis of the goal context." in result:
@@ -89,7 +92,7 @@ def parse_about(result: str, map_l_p:Dict[str, str], map_p_l:Dict[str, str]) -> 
 
         if logical_path:
             physical_path = solve_logical_path(logical_path, map_l_p)
-        elif physical_path:
+        if physical_path:
             logical_path = solve_physical_path(physical_path, map_p_l)
             is_local = True
             if logical_path:
@@ -101,10 +104,21 @@ def parse_about(result: str, map_l_p:Dict[str, str], map_p_l:Dict[str, str]) -> 
         line_start, line_end = (map(int, line_part.split('-')) if '-' in line_part else (int(line_part), int(line_part)))
         char_start, char_end = (map(int, char_part.split('-')) if '-' in char_part else (int(char_part), int(char_part)))
 
-        r = Range(
-            start=Position(line_start, char_start),
-            end=Position(line_end, char_end)
-        )
-        
-        return Element(path=physical_path, logical_path=logical_path, name=name, kind=kind, fqn=fqn, range=r), is_local
+        start_pos = Position(line_start, char_start)
+        end_pos = Position(line_end, char_end)
+
+        match kind:
+            case 'Constant':
+                normalized_kind = VernacKind.CONSTANT
+            case 'Constructor':
+                normalized_kind = VernacKind.CONSTRUCTOR
+            case 'Inductive':
+                normalized_kind = VernacKind.INDUCTIVE
+            case 'Notation':
+                normalized_kind = VernacKind.NOTATION
+        if not normalized_kind:
+            raise Exception(f'Kind not supported in {result}')
+        name = fqn.split('.')[-1]
+        element = VernacElement(kind=normalized_kind, range=Range(start=start_pos, end=end_pos), name=name, data={"fqn": fqn, "physical_path": physical_path})
+        return element, is_local
     return None, False
