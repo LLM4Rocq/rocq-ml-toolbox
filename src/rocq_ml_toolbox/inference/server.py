@@ -13,6 +13,7 @@ from pytanque.protocol import (
 from ..rocq_lsp.client import LspClient
 from ..rocq_lsp.structs import TextDocumentItem
 from ..parser.utils.position import extract_subtext
+from ..parser.ast.driver import load_ast_dump
 from .sessions import SessionManager, UnresponsiveError
 
 app = Flask(__name__)
@@ -396,7 +397,7 @@ def start():
 #     return jsonify(output), 200
 
 @app.route("/get_document", methods=["POST"])
-def get_ast():
+def get_document():
     """
     Extract fleche document representation from document at `path`.
     """
@@ -413,6 +414,19 @@ def get_ast():
     for ranged_span in fleche_document.spans:
         ranged_span.span = extract_subtext(item.text, ranged_span.range)
     return jsonify(fleche_document.to_json()), 200
+
+@app.route("/get_ast", methods=["POST"])
+def get_ast():
+    """
+    Extract full AST (verbatim) from document at `path`.
+    """
+    data = request.get_json(force=True, silent=False)
+    err = require_json_fields(data, ["path"])
+    if err is not None:
+        return err
+    path = data["path"]
+    output = {"resp": load_ast_dump(path)}
+    return jsonify(output), 200
 
 @app.route("/get_session", methods=["POST"])
 def get_session():
