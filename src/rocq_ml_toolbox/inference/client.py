@@ -14,6 +14,7 @@ from pytanque.protocol import (
 )
 
 from ..rocq_lsp.protocol import FlecheDocument
+from ..parser.ast.driver import VernacElement, parse_ast_dump
 
 class ClientError(Exception):
     def __init__(self, code, message):
@@ -84,7 +85,7 @@ class PetClient:
     def _check_state(self, state: State):
         state_id = state.to_json_string()
         if state_id in self.dead_states:
-            raise ClientError(400, 'The given state is dead, do you try to proof simultaneously multiple proofs?')
+            raise ClientError(400, 'The given state is dead, did you try to prove simultaneously multiple theorems?')
 
     def _reset_states(self):
         self.dead_states = self.alive_states | self.dead_states
@@ -228,20 +229,32 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
 
-    @retry
-    def get_document(self, path: str, timeout: int=10) -> FlecheDocument:
+    def get_document(self, path: str) -> FlecheDocument:
         """
         Get fleche representation of document at path `path`.
         """
         url = f"{self.base_url}/get_document"
-        payload = {'path': path, 'timeout': timeout}
+        payload = {'path': path}
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             output = response.json()
             return FlecheDocument.from_json(output)
         else:
             raise ClientError(response.status_code, response.text)
-    
+
+    def get_ast(self, path: str) -> List[VernacElement]:
+        """
+        Get AST of document at path `path`.
+        """
+        url = f"{self.base_url}/get_ast"
+        payload = {'path': path}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            output = response.json()
+            return parse_ast_dump(output['resp'])
+        else:
+            raise ClientError(response.status_code, response.text)
+
     @retry
     @check_states
     def ast(self, state: State, text: str, failure: bool=False, timeout: int=10, retry: int=0) -> Dict:
