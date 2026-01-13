@@ -1,6 +1,6 @@
 [project]
 name = "rocq_ml_toolbox"
-version = "0.0.2"
+version = "0.0.3"
 description = "A Rocq ML Toolbox to scrap dataset and do inference at scale."
 authors = [
     {name = "Théo Stoskopf", email = "theo.stoskopf@inria.fr"}

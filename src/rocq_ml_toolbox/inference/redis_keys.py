@@ -9,7 +9,7 @@ class PetStatus(StrEnum):
 def session_key(session_id: str) -> str:
     return f"session:{session_id}"
 
-def cache_state_key(id: int) -> str:
+def cache_state_key(id: str) -> str:
     return f"cache_state:{id}"
 
 def pet_status_key(pet_idx: int) -> str:

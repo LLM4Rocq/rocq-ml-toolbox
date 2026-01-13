@@ -29,6 +29,7 @@ def kill_signal(pet_idx):
 
 def try_proof(entry, server_url, retry=1, failure_rate=0.3):
     client = PetClient(server_url)
+    client.connect()
     filepath = os.path.join(MC_DIR, entry["filepath"])
 
     retry = max(1, int(retry))

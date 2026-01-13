@@ -3,8 +3,10 @@ from typing import Optional
 import re
 import shlex
 import sys
-import signal
 from abc import abstractmethod, ABC
+import io
+import tarfile
+from pathlib import PurePosixPath
 
 import docker
 from docker.models.containers import Container
@@ -30,10 +32,6 @@ class BaseDocker(ABC):
     def _timeout_handler(signum, frame):
         """Signal handler for timeouts."""
         raise TimeoutError("Operation timed out")
-
-    @abstractmethod
-    def install_project(self, container, project: str, extra_args: str = ""):
-        pass
 
     def _kill_clone(self, image_name):
         try:
@@ -64,25 +62,10 @@ class BaseDocker(ABC):
             network_mode="host",
         )
 
+    @abstractmethod
     def _build_image(self, timeout_install=3600):
         """Create a container image for the requested packages if needed."""
-        self.container = self.client.containers.run(
-            self.config.base_image,
-            detach=True,
-            tty=False,
-            stdin_open=False,
-            user=self.config.user,
-            command=["sleep", "infinity"],
-            network_mode="host",
-        )
-
-        print('Build Image')
-        signal.signal(signal.SIGALRM, BaseDocker._timeout_handler)
-        signal.alarm(timeout_install)
-        self.install_project(" ".join(self.config.packages))
-        signal.alarm(0)
-
-        self.container.commit(self.config.name, self.config.tag)
+        pass
 
     def _ensure_running(self):
         """Guarantee the container is running before issuing commands."""
@@ -136,7 +119,7 @@ class BaseDocker(ABC):
         )["Id"]
         return self.client.api.exec_start(exec_id).decode('utf-8')
 
-    def _read_file(self, filepath, max_bytes=None, encoding="utf-8") -> str:
+    def read_file(self, filepath, max_bytes=None, encoding="utf-8") -> str:
         """Read a file from the container filesystem."""
         api = self.client.api
         cmd = f"sh -lc 'cat -- {shlex.quote(filepath)}'"
@@ -160,11 +143,6 @@ class BaseDocker(ABC):
             raise RuntimeError(f"cat failed with exit code {code}")
         return buf.decode(encoding, errors="replace")
 
-    def get_source(self, filepath) -> Source:
-        """Return a `Source` dataclass for a file inside the container."""
-        content = self._read_file(filepath)
-        return Source(path=Path(filepath), content=content)
-
     def kill_container(self, container: Container):
         try:
             container.kill()
@@ -175,3 +153,38 @@ class BaseDocker(ABC):
         """Stop and remove the underlying containers."""
         self.kill_container(self.container)
         self.kill_container(self.redis_container)
+
+    def write_file(self, path, content: str, create_dir: bool = False, *, encoding: str = "utf-8") -> None:
+        """
+        Create/overwrite `path` inside the container with `content`.
+        If create_dir=True, missing parent directories are created.
+        """
+        self._ensure_running()
+
+        p = PurePosixPath(str(path))
+        if not p.name:
+            raise ValueError(f"Invalid file path: {path!r}")
+
+        parent = str(p.parent) if str(p.parent) else "/"
+        name = p.name
+
+        if create_dir:
+            api = self.client.api
+            cmd = f"sh -lc 'mkdir -p -- {shlex.quote(parent)}'"
+            exec_id = api.exec_create(self.container.id, cmd, stdout=True, stderr=True, tty=False)["Id"]
+            _ = api.exec_start(exec_id)  # consume output
+            code = api.exec_inspect(exec_id).get("ExitCode", 1)
+            if code != 0:
+                raise RuntimeError(f"Failed to create directory {parent!r} (exit code {code})")
+
+        data = content.encode(encoding)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            ti = tarfile.TarInfo(name=name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+        buf.seek(0)
+
+        ok = self.container.put_archive(parent, buf.getvalue())
+        if not ok:
+            raise RuntimeError(f"Failed to write file to {str(p)!r}")

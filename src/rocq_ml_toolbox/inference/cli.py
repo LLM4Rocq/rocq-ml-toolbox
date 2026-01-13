@@ -13,7 +13,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("-p", "--port", type=int, default=5000)
     p.add_argument("-w", "--workers", type=int, default=9)
     p.add_argument("-t", "--timeout", type=int, default=600)
-
+    p.add_argument("-d", "--detached", action="store_true", help="Run gunicorn in the background (daemon mode).")
+    p.add_argument("--pidfile", default="/tmp/rocq-ml-server.pid", help="PID file (with --detached).")
     p.add_argument("--num-pet-server", type=int, default=4)
     p.add_argument("--pet-server-start-port", type=int, default=8765)
     p.add_argument("--max-ram-per-pet", type=int, default=3072, help="Maximum allowed ram usage in MB per pet-server process.")
@@ -38,6 +39,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         "--access-logfile", args.accesslog,
         "--capture-output",
     ]
+    if args.detached:
+        cmd += ["--daemon", "--pid", args.pidfile]
 
     os.environ["NUM_PET_SERVER"] = str(args.num_pet_server)
     os.environ["PET_SERVER_START_PORT"] = str(args.pet_server_start_port)

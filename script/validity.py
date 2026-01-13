@@ -15,6 +15,7 @@ MC_DIR = 'stress_test_light/source'
 
 def try_proof(entry, server_url):
     client = PetClient(server_url)
+    client.connect()
     filepath = os.path.join(MC_DIR, entry['filepath'])
     try:
         k = 0

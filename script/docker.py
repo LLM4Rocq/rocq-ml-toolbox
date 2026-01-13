@@ -8,6 +8,7 @@ try:
     opam_docker.start_inference_server(port=5000)
 
     client = PetClient("http://127.0.0.1:5000")
+    client.connect()
     print("READY")
     print(client.get_session())
 
