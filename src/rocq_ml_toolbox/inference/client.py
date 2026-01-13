@@ -114,13 +114,14 @@ class PetClient:
 
     @retry
     @check_states
-    def run(self, state: State, tactic: str, failure: bool=False, timeout: int=60, retry: int=0) -> State:
+    def run(self, state: State, tactic: str, opts: Optional[Opts]=None, failure: bool=False, timeout: int=60, retry: int=0) -> State:
         """
         Execute a given tactic on the current proof state.
         """
         url = f"{self.base_url}/run"
         state = state.to_json()
-        payload = {'session_id': self.session_id, 'state': state, 'tactic': tactic, 'failure': failure, 'timeout': timeout}
+        opts = opts.to_json() if opts else None
+        payload = {'session_id': self.session_id, 'state': state, 'tactic': tactic, 'opts': opts, 'failure': failure, 'timeout': timeout}
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             output = response.json()

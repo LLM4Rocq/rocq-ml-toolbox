@@ -155,6 +155,7 @@ def run():
         return err
     
     data['state'] = State.from_json(data['state'])
+    data['opts'] = Opts.from_json(data['opts']) if 'opts' in data and data['opts'] else None
     state = session_manager.run(**data)
     output = {"resp": state.to_json()}
     return jsonify(output), 200
