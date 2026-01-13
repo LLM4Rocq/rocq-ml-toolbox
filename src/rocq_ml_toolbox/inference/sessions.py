@@ -391,11 +391,11 @@ class SessionManager:
             op=op,
         )
 
-    def run(self, session_id: str, state: State, tactic: str, failure: bool=False, timeout=60) -> State:
+    def run(self, session_id: str, state: State, tactic: str, opts: Optional[Opts]=None, failure: bool=False, timeout=60) -> State:
         """Execute a given tactic on the current proof state. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            new_state = worker.run(state, tactic, verbose=False, timeout=timeout)
+            new_state = worker.run(state, tactic, opts=opts, verbose=False, timeout=timeout)
 
             sess.tactics.append((new_state, tactic))
             self.save_session(sess)
