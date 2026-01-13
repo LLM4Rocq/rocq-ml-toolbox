@@ -3,7 +3,7 @@
 from typing import List, Optional, Tuple, Generator, Dict, Union
 import re
 
-from pytanque.protocol import State
+from pytanque.protocol import State, Opts
 
 from .utils.ast import list_dependencies
 from .utils.message import parse_about, parse_loadpath, solve_physical_path
@@ -69,7 +69,10 @@ class RocqParser:
         result = self.client.run(state, 'Print LoadPath.', timeout=timeout, retry=retry)
         return parse_loadpath(result.feedback[0][1])
 
-    def extract_proofs(self, source: Source, timeout=60, retry=1, solve_deps=False, verbose=False) -> Generator[Theorem, None, None]:
+    def extract_toc(self, source: Source) -> List[VernacElement]:
+        return self.client.get_ast(source.path)
+
+    def extract_proofs(self, source: Source, timeout=120, retry=1, solve_deps=False, verbose=False) -> Generator[Theorem, None, None]:
         ast = self.client.get_ast(source.path)
         proof_open = False
         initial_goals = None
@@ -95,12 +98,12 @@ class RocqParser:
                     proof_open = True
                     theorem_element = entry
                     pos = offset_to_pos(source.content, entry.span.ep)
-                    state = self.client.get_state_at_pos(source.path, pos.line, pos.character)
+                    state = self.client.get_state_at_pos(source.path, pos.line, pos.character, timeout=timeout, retry=retry)
                     initial_goals = self.client.goals(state)
                 case VernacKind.PROOF_STEP:
                     if proof_open:
                         deps = self.extract_dependencies(state, subcontent)
-                        state = self.client.run(state, subcontent)
+                        state = self.client.run(state, subcontent, timeout=timeout, retry=retry)
                         goals = self.client.goals(state)
                         step = Step(subcontent, goals, deps)
                         steps.append(step)
