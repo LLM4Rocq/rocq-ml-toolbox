@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import time
 from typing import List, Optional, Dict, Tuple, Any, Callable, Iterator, TypeVar
 from contextlib import contextmanager
@@ -21,6 +21,7 @@ from pytanque.protocol import (
 import redis
 from redis.lock import Lock
 
+from .client import StateExtended
 from .redis_keys import (
     PetStatus,
     session_key,
@@ -31,25 +32,28 @@ from .redis_keys import (
     session_lock_key,
     archived_sessions_key,
     session_assigned_idx_key,
-    cache_state_key
+    cache_root_state_key,
+    cache_state_start_key,
+    cache_state_at_pos_key
 )
 
 @dataclass
 class Session:
     session_id: str
     pet_idx: int                       # which pet-server index (0..num_pet_server-1)
-    filepath: Optional[str]
-    line: Optional[int]
-    character: Optional[int]
-    tactics: List[Tuple[State, str]]
-    generation: Optional[int]          # pet-server generation where cached state is valid
-    mapping_state: Dict[int, State]  # to map old states with new states in case of replay
+    filepath: Optional[str] = None
+    line: Optional[int] = None
+    character: Optional[int] = None
+    thm: Optional[str] = None
+    tactics: List[Tuple[StateExtended, str]] = field(default_factory=list)
+    generation: Optional[int] = None      # pet-server generation where cached state is valid
+    mapping_state: Dict[str, StateExtended] = field(default_factory=dict)  # to map old states with new states in case of replay
 
     @classmethod
     def from_json(cls, raw: Dict[str, Any]) -> Session:
-        tactics = [(State.from_json(st_json), tac) for st_json, tac in raw.get("tactics", [])]
+        tactics = [(StateExtended.from_json(st_json), tac) for st_json, tac in raw.get("tactics", [])]
         mapping_state_raw = raw.get("mapping_state", {})
-        mapping_state = {int(k): State.from_json(v_json) for k, v_json in mapping_state_raw.items()}
+        mapping_state = {id_str: StateExtended.from_json(v_json) for id_str, v_json in mapping_state_raw.items()}
 
         return cls(
             session_id=raw["session_id"],
@@ -122,7 +126,7 @@ class SessionManager:
             return 0
         return int(data)
 
-    def _get_state_at_pos(self, pet_idx: int, filepath: str, line: int, character: int, opts: Optional[Opts]=None) -> State:
+    def _get_state_at_pos(self, pet_idx: int, filepath: str, line: int, character: int, opts: Optional[Opts]=None) -> StateExtended:
         """get_state_at_pos wrapper to cache state."""
         worker = self._get_worker(pet_idx)
         generation = self.get_generation(pet_idx)
@@ -133,24 +137,78 @@ class SessionManager:
             "generation": generation,
             "pet_idx": pet_idx
         })
-        raw = self.redis_client.get(cache_state_key(id_str))
+        raw = self.redis_client.get(cache_state_at_pos_key(id_str))
     
-        state: Optional[State] = None
+        state_ext: Optional[StateExtended] = None
         if not raw:
             state = worker.get_state_at_pos(filepath, line, character, opts)
-            state.generation = generation
+            state_ext = StateExtended.from_state(state, generation)
         else:
             data = json.loads(raw)
-            cache_state = State.from_json(data)
-            if cache_state.generation != generation:
+            cache_state_ext = StateExtended.from_json(data)
+            if cache_state_ext.generation != generation:
                 state = worker.get_state_at_pos(filepath, line, character, opts)
-                state.generation = generation
+                state_ext = StateExtended.from_state(state, generation)
             else:
-                state = cache_state
+                state_ext = cache_state_ext
 
-        self.redis_client.set(cache_state_key(id_str), json.dumps(state.to_json()))
-        return state
+        self.redis_client.set(cache_state_at_pos_key(id_str), json.dumps(state_ext.to_json()))
+        return state_ext
         
+    def _start(self, pet_idx: int, filepath: str, thm: str, opts: Optional[Opts]=None) -> StateExtended:
+        """start wrapper to cache state."""
+        worker = self._get_worker(pet_idx)
+        generation = self.get_generation(pet_idx)
+        id_str = str({
+            "filepath": filepath,
+            "thm": thm,
+            "generation": generation,
+            "pet_idx": pet_idx
+        })
+        raw = self.redis_client.get(cache_state_start_key(id_str))
+    
+        state_ext: Optional[StateExtended] = None
+        if not raw:
+            state = worker.start(filepath, thm, opts=opts)
+            state_ext = StateExtended.from_state(state, generation)
+        else:
+            data = json.loads(raw)
+            cache_state_ext = StateExtended.from_json(data)
+            if cache_state_ext.generation != generation:
+                state = worker.start(filepath, thm, opts=opts)
+                state_ext = StateExtended.from_state(state, generation)
+            else:
+                state_ext = cache_state_ext
+
+        self.redis_client.set(cache_state_start_key(id_str), json.dumps(state_ext.to_json()))
+        return state_ext
+
+    def _get_root_state(self, pet_idx: int, filepath: str, opts: Optional[Opts]=None) -> StateExtended:
+        """get_root_state wrapper to cache state."""
+        worker = self._get_worker(pet_idx)
+        generation = self.get_generation(pet_idx)
+        id_str = str({
+            "filepath": filepath,
+            "generation": generation,
+            "pet_idx": pet_idx
+        })
+        raw = self.redis_client.get(cache_root_state_key(id_str))
+    
+        state_ext: Optional[StateExtended] = None
+        if not raw:
+            state = worker.get_root_state(filepath, opts=opts)
+            state_ext = StateExtended.from_state(state, generation)
+        else:
+            data = json.loads(raw)
+            cache_state_ext = StateExtended.from_json(data)
+            if cache_state_ext.generation != generation:
+                state = worker.get_root_state(filepath, opts=opts)
+                state_ext = StateExtended.from_state(state, generation)
+            else:
+                state_ext = cache_state_ext
+
+        self.redis_client.set(cache_root_state_key(id_str), json.dumps(state_ext.to_json()))
+        return state_ext
 
     def _get_worker(self, pet_idx: int) -> Pytanque:
         """Return a connected Pytanque client for pet_idx, recreating if generation changed."""
@@ -244,7 +302,7 @@ class SessionManager:
         self.redis_client.incr(session_assigned_idx_key())
         assigned_idx = self.get_assigned_idx() % self.num_pet_server
         uid = str(uuid.uuid4())
-        sess = Session(uid, assigned_idx, None, None, None, [], None, {})
+        sess = Session(session_id=uid, pet_idx=assigned_idx)
         self.save_session(sess)
         self.sessions[uid] = sess
 
@@ -258,19 +316,21 @@ class SessionManager:
             return sess # No need to replay
         
         worker = self._get_worker(sess.pet_idx)
-        state = None
+        state_ext = None
         if sess.filepath:
             try:
                 signal.signal(signal.SIGALRM, SessionManager.handler)
                 signal.alarm(timeout_get_state)
                 lock.extend(timeout_get_state+self.timeout_eps, replace_ttl=True)
-                state = self._get_state_at_pos(sess.pet_idx, sess.filepath, sess.line, sess.character)
-                for old_state, tactic in sess.tactics:
+                state_ext = self._get_state_at_pos(sess.pet_idx, sess.filepath, sess.line, sess.character)
+                for old_state_ext, tactic in sess.tactics:
                     signal.alarm(timeout_run)
                     lock.extend(timeout_run+self.timeout_eps, replace_ttl=True)
-                    state = worker.run(state, tactic, verbose=False, timeout=timeout_run)
-                    old_state_str = old_state.to_json_string()
-                    sess.mapping_state[old_state_str] = state
+                    state = worker.run(state_ext, tactic, verbose=False, timeout=timeout_run)
+                    state_ext = StateExtended.from_state(state, current_generation)
+
+                    old_state_ext_str = old_state_ext.to_json_string()
+                    sess.mapping_state[old_state_ext_str] = state_ext
             finally:
                 signal.alarm(0)
         sess.generation = current_generation
@@ -305,8 +365,8 @@ class SessionManager:
         session_id: str,
         failure: bool,
         error_prefix: str,
-        state: Optional[State]=None
-    ) -> Iterator[Tuple["Session", Pytanque, Lock, Optional[State]]]:
+        state_ext: Optional[StateExtended]=None
+    ) -> Iterator[Tuple[Session, Pytanque, Lock, Optional[StateExtended]]]:
         sess = self.get_session(session_id)
         pet_idx = sess.pet_idx
         lock: Optional[Lock] = None
@@ -317,16 +377,16 @@ class SessionManager:
 
             worker = self._get_worker(sess.pet_idx)
 
-            if state:
+            if state_ext:
                 sess = self.check_session(sess, lock) # refresh after potential replay
-                state_str = state.to_json_string()
-                if state_str in sess.mapping_state:
-                    state = sess.mapping_state[state_str]
+                state_ext_str = state_ext.to_json_string()
+                if state_ext_str in sess.mapping_state:
+                    state_ext = sess.mapping_state[state_ext_str]
 
             if failure:
                 self._failure_simulation()
 
-            yield sess, worker, lock, state
+            yield sess, worker, lock, state_ext
 
         except KeyError:
             raise
@@ -353,36 +413,36 @@ class SessionManager:
         timeout: Optional[int],
         failure: bool,
         error_prefix: str,
-        op: Callable[[Session, Pytanque, Lock, Optional[State]], T],
-        state: Optional[State] = None
+        op: Callable[[Session, Pytanque, Lock, Optional[StateExtended]], T],
+        state_ext: Optional[StateExtended] = None
     ) -> T:
         with self._pet_ctx(
             session_id,
             failure=failure,
             error_prefix=error_prefix,
-            state=state
-        ) as (sess, worker, lock, new_state):
+            state_ext=state_ext
+        ) as (sess, worker, lock, new_state_ext):
             with self._alarm(timeout):
-                return op(sess, worker, lock, new_state)
+                return op(sess, worker, lock, new_state_ext)
 
-    def get_state_at_pos(self, session_id: str, filepath: str, line: int, character: int, opts: Optional[Opts]=None, failure: bool=False, timeout=120) -> State:
+    def get_state_at_pos(self, session_id: str, filepath: str, line: int, character: int, opts: Optional[Opts]=None, failure: bool=False, timeout=120) -> StateExtended:
         """Start a theorem proving session for the theorem at the given position. See pytanque documentation for more details."""
-        def op(sess: Session, worker: Pytanque, lock:Lock, state: Optional[State]):
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: Optional[StateExtended]):
             sess.generation = self.get_generation(sess.pet_idx)
 
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            state = self._get_state_at_pos(sess.pet_idx, filepath, line, character, opts)
+            state_ext = self._get_state_at_pos(sess.pet_idx, filepath, line, character, opts)
             if sess.tactics:
                 self.archive_session(sess)
             
             sess.filepath = filepath
             sess.line = line
             sess.character = character
-            sess.tactics = [(state, "")]
+            sess.tactics = [(state_ext, "")]
             sess.mapping_state = {}
             self.save_session(sess)
 
-            return state
+            return state_ext
         return self._pet_call(
             session_id,
             timeout=timeout,
@@ -391,16 +451,17 @@ class SessionManager:
             op=op,
         )
 
-    def run(self, session_id: str, state: State, tactic: str, opts: Optional[Opts]=None, failure: bool=False, timeout=60) -> State:
+    def run(self, session_id: str, state_ext: StateExtended, tactic: str, opts: Optional[Opts]=None, failure: bool=False, timeout=60) -> StateExtended:
         """Execute a given tactic on the current proof state. See pytanque documentation for more details."""
-        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+        def op(sess: Session, worker: Pytanque, lock:Lock, state_ext: StateExtended):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            new_state = worker.run(state, tactic, opts=opts, verbose=False, timeout=timeout)
+            new_state = worker.run(state_ext.to_state(), tactic, opts=opts, verbose=False, timeout=timeout)
+            new_state_ext = StateExtended.from_state(new_state, state_ext.generation)
 
-            sess.tactics.append((new_state, tactic))
+            sess.tactics.append((new_state_ext, tactic))
             self.save_session(sess)
 
-            return new_state
+            return new_state_ext
 
         return self._pet_call(
             session_id,
@@ -408,14 +469,14 @@ class SessionManager:
             failure=failure,
             error_prefix="Tactic execution failed",
             op=op,
-            state=state
+            state_ext=state_ext
         )
     
-    def goals(self, session_id: str, state: State, pretty=True, failure=False, timeout=10) -> List[Goal]:
+    def goals(self, session_id: str, state_ext: StateExtended, pretty=True, failure=False, timeout=10) -> List[Goal]:
         """Gather goals associated to a state. See pytanque documentation for more details."""
-        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+        def op(sess: Session, worker: Pytanque, lock:Lock, state_ext: StateExtended):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            goals = worker.goals(state, pretty=pretty)
+            goals = worker.goals(state_ext.to_state(), pretty=pretty)
             return goals
 
         return self._pet_call(
@@ -424,14 +485,14 @@ class SessionManager:
             failure=failure,
             error_prefix="Goals gathering failed",
             op=op,
-            state=state
+            state_ext=state_ext
         )
 
-    def complete_goals(self, session_id: str, state: State, pretty=True, failure=False, timeout=10) -> List[Dict]:
+    def complete_goals(self, session_id: str, state_ext: StateExtended, pretty=True, failure=False, timeout=10) -> List[Dict]:
         """Gather complete goals associated to a state. See pytanque documentation for more details."""
-        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+        def op(sess: Session, worker: Pytanque, lock:Lock, state_ext: StateExtended):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            goals = worker.complete_goals(state, pretty=pretty)
+            goals = worker.complete_goals(state_ext.to_state(), pretty=pretty)
             return goals
 
         return self._pet_call(
@@ -440,14 +501,14 @@ class SessionManager:
             failure=failure,
             error_prefix="Complete goals gathering failed",
             op=op,
-            state=state
+            state_ext=state_ext
         )
 
-    def premises(self, session_id: str, state: State, failure=False, timeout=10) -> Any:
+    def premises(self, session_id: str, state_ext: StateExtended, failure=False, timeout=10) -> Any:
         """Gather accessible premises (lemmas, definitions) from a state. See pytanque documentation for more details."""
-        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+        def op(sess: Session, worker: Pytanque, lock:Lock, state_ext: StateExtended):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            premises = worker.premises(state)
+            premises = worker.premises(state_ext.to_state())
             return premises
 
         return self._pet_call(
@@ -456,17 +517,19 @@ class SessionManager:
             failure=failure,
             error_prefix="Premises gathering failed",
             op=op,
-            state=state
+            state_ext=state_ext
         )
 
-    def state_equal(self, session_id: str, st1: State, st2: State, kind: Inspect, failure=False, timeout=10) -> bool:
+    def state_equal(self, session_id: str, st1_ext: StateExtended, st2_ext: StateExtended, kind: Inspect, failure=False, timeout=10) -> bool:
         """Check whether st1 is equal to st2. Beware st1, and st2 are expected to belong to the same session. See pytanque documentation for more details."""
-        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
-            nonlocal st2
+        def op(sess: Session, worker: Pytanque, lock:Lock, state_ext: StateExtended):
+            nonlocal st2_ext
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            if st2.hash in sess.mapping_state:
-                st2 = sess.mapping_state[st2.hash]
-            result = worker.state_equal(state, st2, kind)
+
+            st2_ext_str = st2_ext.to_json_string()
+            if st2_ext_str in sess.mapping_state:
+                st2_ext = sess.mapping_state[st2_ext_str]
+            result = worker.state_equal(state_ext.to_state(), st2_ext.to_state(), kind)
             return result
 
         return self._pet_call(
@@ -475,14 +538,14 @@ class SessionManager:
             failure=failure,
             error_prefix="State hash failed",
             op=op,
-            state=st1
+            state_ext=st1_ext
         )
 
-    def state_hash(self, session_id: str, state: State, failure=False, timeout=10) -> int:
+    def state_hash(self, session_id: str, state_ext: StateExtended, failure=False, timeout=10) -> int:
         """Get a hash value for a proof state. See pytanque documentation for more details."""
-        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+        def op(sess: Session, worker: Pytanque, lock:Lock, state_ext: StateExtended):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            hash = worker.state_hash(state)
+            hash = worker.state_hash(state_ext.to_state())
             return hash
 
         return self._pet_call(
@@ -491,12 +554,12 @@ class SessionManager:
             failure=failure,
             error_prefix="State hash failed",
             op=op,
-            state=state
+            state_ext=state_ext
         )
 
     def toc(self, session_id: str, file: str, failure=False, timeout=120) -> list[tuple[str, Any]]:
         """Get toc of a file. See pytanque documentation for more details."""
-        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: StateExtended):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
             toc = worker.toc(file)
             return toc
@@ -509,11 +572,11 @@ class SessionManager:
             op=op
         )
     
-    def ast(self, session_id: str, state: State, text: str, failure=False, timeout=120) -> Dict:
+    def ast(self, session_id: str, state_ext: StateExtended, text: str, failure=False, timeout=120) -> Dict:
         """Get ast of a command parsed at a state. See pytanque documentation for more details."""
-        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+        def op(sess: Session, worker: Pytanque, lock:Lock, state_ext: StateExtended):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            ast = worker.ast(state, text)
+            ast = worker.ast(state_ext.to_state(), text)
             return ast
 
         return self._pet_call(
@@ -522,12 +585,12 @@ class SessionManager:
             failure=failure,
             error_prefix="AST failed",
             op=op,
-            state=state
+            state_ext=state_ext
         )
 
     def ast_at_pos(self, session_id: str, file: str, line: int, character: int, failure=False, timeout=120) -> Dict:
         """Get ast at a specified position in a file. See pytanque documentation for more details."""
-        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+        def op(sess: Session, worker: Pytanque, lock:Lock, state: StateExtended):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
             ast = worker.ast_at_pos(file, line, character)
             return ast
@@ -540,12 +603,22 @@ class SessionManager:
             op=op
         )
 
-    def get_root_state(self, session_id: str, file: str, opts: Optional[Opts]=None, failure=False, timeout=120) -> State:
+    def get_root_state(self, session_id: str, file: str, opts: Optional[Opts]=None, failure=False, timeout=120) -> StateExtended:
         """Get root state of a document. See pytanque documentation for more details."""
-        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+        def op(sess: Session, worker: Pytanque, lock:Lock, state_ext: StateExtended):
+            sess.generation = self.get_generation(sess.pet_idx)
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            state = worker.get_root_state(file, opts=opts)
-            return state
+
+            state_ext = self._get_root_state(sess.pet_idx, file, opts=opts)
+            if sess.tactics:
+                self.archive_session(sess)
+            sess.filepath = file
+            sess.line = 0
+            sess.character = 0
+            sess.tactics = [(state_ext, "")]
+            sess.mapping_state = {}
+            self.save_session(sess)
+            return state_ext
 
         return self._pet_call(
             session_id,
@@ -555,11 +628,11 @@ class SessionManager:
             op=op
         )
     
-    def list_notations_in_statement(self, session_id: str, state: State, statement: str, failure=False, timeout=10) -> list[Dict]:
+    def list_notations_in_statement(self, session_id: str, state_ext: StateExtended, statement: str, failure=False, timeout=10) -> list[Dict]:
         """Get the list of notations appearing in a theorem/lemma statement. See pytanque documentation for more details."""
-        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+        def op(sess: Session, worker: Pytanque, lock:Lock, state_ext: StateExtended):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            notations = worker.list_notations_in_statement(state, statement)
+            notations = worker.list_notations_in_statement(state_ext.to_state(), statement)
             return notations
 
         return self._pet_call(
@@ -568,16 +641,23 @@ class SessionManager:
             failure=failure,
             error_prefix="List notations in statement failed",
             op=op,
-            state=state
+            state_ext=state_ext
         )
 
-    def start(self, session_id: str, file: str, thm: str, pre_commands: Optional[str]=None, opts: Optional[Opts]=None, failure=False, timeout=120) -> State:
+    def start(self, session_id: str, file: str, thm: str, pre_commands: Optional[str]=None, opts: Optional[Opts]=None, failure=False, timeout=120) -> StateExtended:
         """Start a proof session for a specific theorem in a Coq/Rocq file. See pytanque documentation for more details."""
-        def op(sess: Session, worker: Pytanque, lock:Lock, state: State):
+        def op(sess: Session, worker: Pytanque, lock:Lock, state_ext: StateExtended):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            state = worker.start(file, thm, pre_commands=pre_commands, opts=opts)
-            return state
-
+            state_ext = self._start(sess.pet_idx, file, thm, opts=opts)
+            if sess.tactics:
+                self.archive_session(sess)
+            sess.filepath = file
+            sess.thm = thm
+            sess.tactics = [(state_ext, "")]
+            sess.mapping_state = {}
+            self.save_session(sess)
+            return state_ext
+        
         return self._pet_call(
             session_id,
             timeout=timeout,

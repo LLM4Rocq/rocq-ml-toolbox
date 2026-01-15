@@ -40,6 +40,11 @@ class OpamDocker(BaseDocker):
         if code != 0:
             raise RuntimeError(f"`opam install {project}` failed with exit code {code}")
 
+    def close(self):
+        """Stop and remove the underlying containers."""
+        self.kill_container(self.redis_container)
+        super().close()
+
     def pin_project(self, text: str):
         cmd = f"sh -lc 'opam pin -y {text}'"
         code = self._stream_exec(cmd, demux=True)
@@ -61,10 +66,10 @@ class OpamDocker(BaseDocker):
         print('Build Image')
         signal.signal(signal.SIGALRM, BaseDocker._timeout_handler)
         signal.alarm(timeout_install)
-        if self.config.opam_pins:
-            self.pin_project(" ".join(self.config.opam_pins))
-        if self.config.opam_packages:
-            self.install_project(" ".join(self.config.opam_packages))
+        if self.config.pins:
+            self.pin_project(" ".join(self.config.pins))
+        if self.config.packages:
+            self.install_project(" ".join(self.config.packages))
         signal.alarm(0)
 
         self.container.commit(self.config.name, self.config.tag)

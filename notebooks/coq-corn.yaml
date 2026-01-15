@@ -1,0 +1,7 @@
+name: theostos/coq-corn
+tag: '9.0-9.0.0'
+packages:
+- coq-corn.9.0.0
+base_image: theostos/rocq-server:9.0
+opam_env_path: /home/rocq/.opam/4.14.2+flambda
+user: rocq

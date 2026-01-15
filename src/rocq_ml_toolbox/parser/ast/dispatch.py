@@ -103,6 +103,6 @@ def parse_node(
         # e.g. VernacExtend unknown entry
         if on_unsupported == "raise":
             raise NotImplementedError(f"Parser returned None for: {kw}")
-        return VernacElement(span=extract_span(obj), kind=VernacKind.UNKNOWN, name=kw, data=None)
+        return VernacElement(span=extract_span(obj), kind=VernacKind.UNKNOWN, name=kw)
 
     return out
