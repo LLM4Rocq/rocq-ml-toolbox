@@ -152,7 +152,6 @@ class BaseDocker(ABC):
     def close(self):
         """Stop and remove the underlying containers."""
         self.kill_container(self.container)
-        self.kill_container(self.redis_container)
 
     def write_file(self, path, content: str, create_dir: bool = False, *, encoding: str = "utf-8") -> None:
         """
