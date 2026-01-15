@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import time
 from typing import List, Optional, Dict, Tuple, Any, Callable, Iterator, TypeVar
 from contextlib import contextmanager
@@ -32,19 +32,22 @@ from .redis_keys import (
     session_lock_key,
     archived_sessions_key,
     session_assigned_idx_key,
-    cache_state_key
+    cache_root_state_key,
+    cache_state_start_key,
+    cache_state_at_pos_key
 )
 
 @dataclass
 class Session:
     session_id: str
     pet_idx: int                       # which pet-server index (0..num_pet_server-1)
-    filepath: Optional[str]
-    line: Optional[int]
-    character: Optional[int]
-    tactics: List[Tuple[StateExtended, str]]
-    generation: Optional[int]          # pet-server generation where cached state is valid
-    mapping_state: Dict[str, StateExtended]  # to map old states with new states in case of replay
+    filepath: Optional[str] = None
+    line: Optional[int] = None
+    character: Optional[int] = None
+    thm: Optional[str] = None
+    tactics: List[Tuple[StateExtended, str]] = field(default_factory=list)
+    generation: Optional[int] = None      # pet-server generation where cached state is valid
+    mapping_state: Dict[str, StateExtended] = field(default_factory=dict)  # to map old states with new states in case of replay
 
     @classmethod
     def from_json(cls, raw: Dict[str, Any]) -> Session:
@@ -134,7 +137,7 @@ class SessionManager:
             "generation": generation,
             "pet_idx": pet_idx
         })
-        raw = self.redis_client.get(cache_state_key(id_str))
+        raw = self.redis_client.get(cache_state_at_pos_key(id_str))
     
         state_ext: Optional[StateExtended] = None
         if not raw:
@@ -149,9 +152,63 @@ class SessionManager:
             else:
                 state_ext = cache_state_ext
 
-        self.redis_client.set(cache_state_key(id_str), json.dumps(state_ext.to_json()))
+        self.redis_client.set(cache_state_at_pos_key(id_str), json.dumps(state_ext.to_json()))
         return state_ext
         
+    def _start(self, pet_idx: int, filepath: str, thm: str, opts: Optional[Opts]=None) -> StateExtended:
+        """start wrapper to cache state."""
+        worker = self._get_worker(pet_idx)
+        generation = self.get_generation(pet_idx)
+        id_str = str({
+            "filepath": filepath,
+            "thm": thm,
+            "generation": generation,
+            "pet_idx": pet_idx
+        })
+        raw = self.redis_client.get(cache_state_start_key(id_str))
+    
+        state_ext: Optional[StateExtended] = None
+        if not raw:
+            state = worker.start(filepath, thm, opts=opts)
+            state_ext = StateExtended.from_state(state, generation)
+        else:
+            data = json.loads(raw)
+            cache_state_ext = StateExtended.from_json(data)
+            if cache_state_ext.generation != generation:
+                state = worker.start(filepath, thm, opts=opts)
+                state_ext = StateExtended.from_state(state, generation)
+            else:
+                state_ext = cache_state_ext
+
+        self.redis_client.set(cache_state_start_key(id_str), json.dumps(state_ext.to_json()))
+        return state_ext
+
+    def _get_root_state(self, pet_idx: int, filepath: str, opts: Optional[Opts]=None) -> StateExtended:
+        """get_root_state wrapper to cache state."""
+        worker = self._get_worker(pet_idx)
+        generation = self.get_generation(pet_idx)
+        id_str = str({
+            "filepath": filepath,
+            "generation": generation,
+            "pet_idx": pet_idx
+        })
+        raw = self.redis_client.get(cache_root_state_key(id_str))
+    
+        state_ext: Optional[StateExtended] = None
+        if not raw:
+            state = worker.get_root_state(filepath, opts=opts)
+            state_ext = StateExtended.from_state(state, generation)
+        else:
+            data = json.loads(raw)
+            cache_state_ext = StateExtended.from_json(data)
+            if cache_state_ext.generation != generation:
+                state = worker.get_root_state(filepath, opts=opts)
+                state_ext = StateExtended.from_state(state, generation)
+            else:
+                state_ext = cache_state_ext
+
+        self.redis_client.set(cache_root_state_key(id_str), json.dumps(state_ext.to_json()))
+        return state_ext
 
     def _get_worker(self, pet_idx: int) -> Pytanque:
         """Return a connected Pytanque client for pet_idx, recreating if generation changed."""
@@ -245,7 +302,7 @@ class SessionManager:
         self.redis_client.incr(session_assigned_idx_key())
         assigned_idx = self.get_assigned_idx() % self.num_pet_server
         uid = str(uuid.uuid4())
-        sess = Session(uid, assigned_idx, None, None, None, [], None, {})
+        sess = Session(session_id=uid, pet_idx=assigned_idx)
         self.save_session(sess)
         self.sessions[uid] = sess
 
@@ -546,29 +603,21 @@ class SessionManager:
             op=op
         )
 
-    # def op(sess: Session, worker: Pytanque, lock:Lock, state: Optional[StateExtended]):
-    #         sess.generation = self.get_generation(sess.pet_idx)
-
-    #         lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-    #         state = self._get_state_at_pos(sess.pet_idx, filepath, line, character, opts)
-    #         if sess.tactics:
-    #             self.archive_session(sess)
-            
-    #         sess.filepath = filepath
-    #         sess.line = line
-    #         sess.character = character
-    #         sess.tactics = [(state, "")]
-    #         sess.mapping_state = {}
-    #         self.save_session(sess)
-
-    #         return state
     def get_root_state(self, session_id: str, file: str, opts: Optional[Opts]=None, failure=False, timeout=120) -> StateExtended:
         """Get root state of a document. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state_ext: StateExtended):
             sess.generation = self.get_generation(sess.pet_idx)
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            state = worker.get_root_state(file, opts=opts)
-            state_ext = StateExtended.from_state(state, sess.generation)
+
+            state_ext = self._get_root_state(sess.pet_idx, file, opts=opts)
+            if sess.tactics:
+                self.archive_session(sess)
+            sess.filepath = file
+            sess.line = 0
+            sess.character = 0
+            sess.tactics = [(state_ext, "")]
+            sess.mapping_state = {}
+            self.save_session(sess)
             return state_ext
 
         return self._pet_call(
@@ -598,12 +647,17 @@ class SessionManager:
     def start(self, session_id: str, file: str, thm: str, pre_commands: Optional[str]=None, opts: Optional[Opts]=None, failure=False, timeout=120) -> StateExtended:
         """Start a proof session for a specific theorem in a Coq/Rocq file. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state_ext: StateExtended):
-            gen = self.get_generation(sess.pet_idx)
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
-            state = worker.start(file, thm, pre_commands=pre_commands, opts=opts)
-            state_ext = StateExtended.from_state(state, gen)
+            state_ext = self._start(sess.pet_idx, file, thm, opts=opts)
+            if sess.tactics:
+                self.archive_session(sess)
+            sess.filepath = file
+            sess.thm = thm
+            sess.tactics = [(state_ext, "")]
+            sess.mapping_state = {}
+            self.save_session(sess)
             return state_ext
-
+        
         return self._pet_call(
             session_id,
             timeout=timeout,
