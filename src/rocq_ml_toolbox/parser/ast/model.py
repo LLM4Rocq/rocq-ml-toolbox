@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum, auto
+from enum import StrEnum, auto
 from typing import Any, Optional
 from pytanque.protocol import Range
 
@@ -16,7 +16,7 @@ class AstNode:
     range: Optional[Range]=None
     name: Optional[str]=None
 
-class VernacKind(Enum):
+class VernacKind(StrEnum):
     REQUIRE = auto()
     IMPORT = auto()
     OPEN_CLOSE_SCOPE = auto()
@@ -85,7 +85,7 @@ class VernacKind(Enum):
 class VernacElement(AstNode):
     kind: VernacKind
     members: Optional[list[VernacElement]]=field(default_factory=list)
-    data: Optional[dict[str, Any]]=field(default_factory=dict)
+    data: dict[str, Any]=field(default_factory=dict)
 
 @dataclass(kw_only=True)
 class UnsupportedNode(VernacElement):
