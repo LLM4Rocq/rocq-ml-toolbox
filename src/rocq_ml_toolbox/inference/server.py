@@ -412,8 +412,10 @@ def get_document():
         client.initialize(item)
         client.didOpen(item)
         fleche_document = client.getDocument(item)
+    
+    text_utf8 = item.text.encode("utf-8")
     for ranged_span in fleche_document.spans:
-        ranged_span.span = extract_subtext(item.text, ranged_span.range)
+        ranged_span.span = extract_subtext(text_utf8, ranged_span.range)
     return jsonify(fleche_document.to_json()), 200
 
 @app.route("/get_ast", methods=["POST"])
