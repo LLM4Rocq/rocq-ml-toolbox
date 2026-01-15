@@ -210,10 +210,10 @@ def parse_inductive(obj: dict) -> VernacElement:
         return out
 
     def collect_fields(ctors_ast, kind: VernacKind) -> list[VernacElement]:
-        out: list[Member] = []
+        out: list[VernacElement] = []
         for ctor in as_list(ctors_ast):
             ctor_name = ensure_str(jmaybe(ctor, 1, 0, "v", 1, default=None))
-            member = Member(span=extract_span(ctor), name=ctor_name, kind=kind)
+            member = VernacElement(span=extract_span(ctor), name=ctor_name, kind=kind)
             out.append(member)
         return out
 
