@@ -3,10 +3,9 @@ import traceback
 import logging
 
 from flask import Flask, request, jsonify, current_app
-from pytanque import State, PetanqueError
+from pytanque import PetanqueError
 from pytanque.protocol import (
     Opts,
-    State,
     Inspect
 )
 
@@ -14,6 +13,7 @@ from ..rocq_lsp.client import LspClient
 from ..rocq_lsp.structs import TextDocumentItem
 from ..parser.utils.position import extract_subtext
 from ..parser.ast.driver import load_ast_dump
+from .client import StateExtended
 from .sessions import SessionManager, UnresponsiveError
 
 app = Flask(__name__)
@@ -145,16 +145,16 @@ def run():
     Execute a given tactic on the current proof state.
 
     Expects JSON:
-        - state: the current proof state (JSON from previous response)
+        - state_ext: the current proof state (JSON from previous response)
         - tactic: tactic command (str)
         - session_id: session ID from /login
     """
     data = request.get_json(force=True, silent=False)
-    err = require_json_fields(data, ["state", "tactic", "session_id"])
+    err = require_json_fields(data, ["state_ext", "tactic", "session_id"])
     if err is not None:
         return err
     
-    data['state'] = State.from_json(data['state'])
+    data['state_ext'] = StateExtended.from_json(data['state_ext'])
     data['opts'] = Opts.from_json(data['opts']) if 'opts' in data and data['opts'] else None
     state = session_manager.run(**data)
     output = {"resp": state.to_json()}
@@ -166,15 +166,15 @@ def goals():
     Gather goals associated to a state.
 
     Expects JSON:
-        - state: the current proof state (JSON from previous response)
+        - state_ext: the current proof state (JSON from previous response)
         - session_id: session ID from /login
     """
     data = request.get_json(force=True, silent=False)
-    err = require_json_fields(data, ["session_id", "state"])
+    err = require_json_fields(data, ["session_id", "state_ext"])
     if err is not None:
         return err
     
-    data['state'] = State.from_json(data['state'])
+    data['state_ext'] = StateExtended.from_json(data['state_ext'])
     goals = session_manager.goals(**data)
     output = {"resp": [goal.to_json() for goal in goals]}
     return jsonify(output), 200
@@ -185,15 +185,15 @@ def complete_goals():
     Gather complete goals associated to a state.
 
     Expects JSON:
-        - state: the current proof state (JSON from previous response)
+        - state_ext: the current proof state (JSON from previous response)
         - session_id: session ID from /login
     """
     data = request.get_json(force=True, silent=False)
-    err = require_json_fields(data, ["session_id", "state"])
+    err = require_json_fields(data, ["session_id", "state_ext"])
     if err is not None:
         return err
     
-    data['state'] = State.from_json(data['state'])
+    data['state_ext'] = StateExtended.from_json(data['state_ext'])
     goals = session_manager.complete_goals(**data)
     output = {"resp": goals}
     return jsonify(output), 200
@@ -204,15 +204,15 @@ def premises():
     Gather accessible premises (lemmas, definitions) from a state.
 
     Expects JSON:
-        - state: the current proof state (JSON from previous response)
+        - state_ext: the current proof state (JSON from previous response)
         - session_id: session ID from /login
     """
     data = request.get_json(force=True, silent=False)
-    err = require_json_fields(data, ["session_id", "state"])
+    err = require_json_fields(data, ["session_id", "state_ext"])
     if err is not None:
         return err
     
-    data['state'] = State.from_json(data['state'])
+    data['state_ext'] = StateExtended.from_json(data['state_ext'])
     premises = session_manager.premises(**data)
     output = {"resp": premises}
     return jsonify(output), 200
@@ -223,19 +223,19 @@ def state_equal():
     Check whether state st1 is equal to state st2.
 
     Expects JSON:
-        - st1: the first state
-        - st2: the second state
+        - st1_ext: the first state
+        - st2_ext: the second state
         - kind: comparison type
         - session_id: session ID from /login
     """
     
     data = request.get_json(force=True, silent=False)
-    err = require_json_fields(data, ["session_id", "st1", "st2", "kind"])
+    err = require_json_fields(data, ["session_id", "st1_ext", "st2_ext", "kind"])
     if err is not None:
         return err
     
-    data['st1'] = State.from_json(data['st1'])
-    data['st2'] = State.from_json(data['st2'])
+    data['st1_ext'] = StateExtended.from_json(data['st1_ext'])
+    data['st2_ext'] = StateExtended.from_json(data['st2_ext'])
     data['kind'] = Inspect.from_json(data['kind'])
     result = session_manager.state_equal(**data)
     output = {"resp": result}
@@ -247,15 +247,15 @@ def state_hash():
     Get a hash value for a proof state.
 
     Expects JSON:
-        - state
+        - state_ext
         - session_id: session ID from /login
     """
     data = request.get_json(force=True, silent=False)
-    err = require_json_fields(data, ["session_id", "state"])
+    err = require_json_fields(data, ["session_id", "state_ext"])
     if err is not None:
         return err
     
-    data['state'] = State.from_json(data['state'])
+    data['state_ext'] = StateExtended.from_json(data['state_ext'])
     hash = session_manager.state_hash(**data)
     output = {"resp": hash}
     return jsonify(output), 200
@@ -285,15 +285,15 @@ def ast():
 
     Expects JSON:
         - text: command to parse
-        - state
+        - state_ext
         - session_id: session ID from /login
     """
     data = request.get_json(force=True, silent=False)
-    err = require_json_fields(data, ["session_id", "text", "state"])
+    err = require_json_fields(data, ["session_id", "text", "state_ext"])
     if err is not None:
         return err
     
-    data['state'] = State.from_json(data['state'])
+    data['state_ext'] = StateExtended.from_json(data['state_ext'])
     ast = session_manager.ast(**data)
     output = {"resp": ast}
     return jsonify(output), 200
@@ -343,16 +343,16 @@ def list_notations_in_statement():
     Get the list of notations appearing in a theorem/lemma statement.
 
     Expects JSON:
-        - state
+        - state_ext
         - statement
         - session_id: session ID from /login
     """
     data = request.get_json(force=True, silent=False)
-    err = require_json_fields(data, ["session_id", "state", "statement"])
+    err = require_json_fields(data, ["session_id", "state_ext", "statement"])
     if err is not None:
         return err
     
-    data['state'] = State.from_json(data['state'])
+    data['state_ext'] = StateExtended.from_json(data['state_ext'])
     notations = session_manager.list_notations_in_statement(**data)
     output = {"resp": notations}
     return jsonify(output), 200
