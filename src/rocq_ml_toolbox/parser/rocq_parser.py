@@ -64,13 +64,17 @@ class RocqParser:
     def _extract_loadpath(self, timeout: int=30, retry=1) -> Dict[str, str]:
         try:
             state = self.client.get_root_state('/tmp/init.v')
-        except ClientError:
+        except ClientError as e:
             raise ParserError('Missing /tmp/init.v file.')
         result = self.client.run(state, 'Print LoadPath.', timeout=timeout, retry=retry)
         return parse_loadpath(result.feedback[0][1])
 
     def extract_toc(self, source: Source) -> List[VernacElement]:
-        return self.client.get_ast(source.path)
+        toc = self.client.get_ast(source.path)
+        content_utf_8 = source.content.encode("utf-8")
+        for entry in toc:
+            entry.data['content'] = content_utf_8[entry.span.bp:entry.span.ep].decode("utf-8")
+        return toc
 
     def extract_proofs(self, source: Source, timeout=120, retry=1, solve_deps=False, verbose=False) -> Generator[Theorem, None, None]:
         ast = self.client.get_ast(source.path)
@@ -80,11 +84,10 @@ class RocqParser:
         steps = []
         namespaces_stack = []
         state = None
-        content_utf_8 = source.content.encode("utf-8")
         for entry in ast:
             span = entry.span
             kind = entry.kind
-            subcontent = content_utf_8[span.bp:span.ep].decode("utf-8")
+            subcontent = source.content_utf8[span.bp:span.ep].decode("utf-8")
             match kind:
                 case VernacKind.BEGIN_SECTION:
                     namespaces_stack.append(("SECTION", entry.name))
@@ -97,7 +100,7 @@ class RocqParser:
                 case VernacKind.START_THEOREM_PROOF:
                     proof_open = True
                     theorem_element = entry
-                    pos = offset_to_pos(source.content, entry.span.ep)
+                    pos = offset_to_pos(source.content_utf8, entry.span.ep)
                     state = self.client.get_state_at_pos(source.path, pos.line, pos.character, timeout=timeout, retry=retry)
                     initial_goals = self.client.goals(state)
                 case VernacKind.PROOF_STEP:
