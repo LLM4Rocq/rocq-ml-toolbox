@@ -2,7 +2,6 @@ from typing import Optional, Dict, Tuple
 import re
 
 from ..parser import Position, ParserError, Source, Range
-from .position import pos_to_offset
 from ..ast.vernac import VernacElement, VernacKind
 from ..ast.model import Span
 
