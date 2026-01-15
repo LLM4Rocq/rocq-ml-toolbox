@@ -15,7 +15,7 @@ rocq-ml-server = "rocq_ml_toolbox.inference.cli:main"
 
 [project.optional-dependencies]
 parser = []
-server = ["flask", "gunicorn", "psutil", "redis"] # pytanque
+server = ["flask", "gunicorn", "psutil", "redis", "requests"] # pytanque
 docker = ["docker", "pyyaml", "requests"]
 client = ["requests"]
 all = ["docker", "flask", "gunicorn", "psutil", "pyyaml", "redis", "requests"]
