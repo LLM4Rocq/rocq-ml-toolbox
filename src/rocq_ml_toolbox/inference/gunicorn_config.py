@@ -8,7 +8,7 @@ import psutil
 
 import redis
 
-from .redis_keys import monitor_epoch_key, pet_status_key, generation_key, cache_state_key, PetStatus, ALL_KEYS_STAR
+from .redis_keys import monitor_epoch_key, pet_status_key, generation_key, PetStatus, ALL_KEYS_STAR
 
 NUM_PET_SERVER = int(os.environ["NUM_PET_SERVER"])
 PET_SERVER_START_PORT = int(os.environ["PET_SERVER_START_PORT"])
