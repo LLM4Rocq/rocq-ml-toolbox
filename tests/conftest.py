@@ -5,6 +5,7 @@ import time
 import sys
 from pathlib import Path
 import psutil
+from typing import Tuple
 
 import pytest
 import requests
@@ -16,12 +17,6 @@ sys.path.insert(0, str(ROOT))
 
 
 def pytest_addoption(parser):
-    parser.addoption(
-        "--server-url",
-        action="store",
-        default=None,
-        help="Use an already running server, e.g. http://127.0.0.1:5000",
-    )
     parser.addoption(
         "--stress-workers",
         action="store",
@@ -82,6 +77,11 @@ def kill_all_proc(proc_name):
 def _start_gunicorn(bind_host: str, bind_port: int) -> subprocess.Popen:
     kill_all_proc('gunicorn')
     kill_all_proc('pet-server')
+    os.environ["NUM_PET_SERVER"] = str(4)
+    os.environ["PET_SERVER_START_PORT"] = str(8765)
+    os.environ["MAX_RAM_PER_PET"] = str(2048)
+    os.environ["REDIS_URL"] = "redis://localhost:6379/0"
+
     cmd = [
         "gunicorn",
         "-w", "9",
@@ -104,14 +104,7 @@ def _start_gunicorn(bind_host: str, bind_port: int) -> subprocess.Popen:
     )
 
 @pytest.fixture(scope="session")
-def server_url(pytestconfig, request) -> str:
-    provided = pytestconfig.getoption("--server-url")
-    if provided:
-        url = provided.rstrip("/")
-        _wait_until_ready(url, proc=None, timeout_s=30.0)
-        yield url
-        return
-
+def server_url(pytestconfig, request):
     # Auto-start (fallback): one server per xdist worker, on different ports
     widx = _worker_index(request)
     host = "127.0.0.1"
@@ -135,7 +128,17 @@ def server_url(pytestconfig, request) -> str:
                 pass
 
 @pytest.fixture(scope="session")
-def client(server_url):
-    client = PetClient(server_url)
+def host(server_url):
+    host = "127.0.0.1"
+    yield host
+
+@pytest.fixture(scope="session")
+def port(server_url):
+    port = 5100
+    yield port
+
+@pytest.fixture(scope="session")
+def client(host, port):
+    client = PetClient(host, port)
     client.connect()
     return client

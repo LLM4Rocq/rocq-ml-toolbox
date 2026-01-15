@@ -16,7 +16,6 @@ from src.rocq_ml_toolbox.inference.redis_keys import pet_status_key, PetStatus
 
 
 MC_DIR = os.environ.get("MC_DIR", "stress_test_light/source")
-redis_client = redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"))
 
 def kill_all_proc(proc_name: str):
     for proc in psutil.process_iter():
@@ -24,8 +23,8 @@ def kill_all_proc(proc_name: str):
             proc.kill()
     time.sleep(1)
 
-def try_proof_kill(entry, server_url) -> bool:
-    client = PetClient(server_url)
+def try_proof_kill(entry, host, port) -> bool:
+    client = PetClient(host, port)
     client.connect()
     filepath = os.path.join(MC_DIR, entry['filepath'])
     try:
@@ -129,8 +128,8 @@ def _load_subset_valid(n: int):
         cache.write_text(json.dumps(payload))
         return payload
 
-def try_proof(entry, server_url, retry=1, failure_rate=0.) -> bool:
-    client = PetClient(server_url)
+def try_proof(entry, host, port, retry=1, failure_rate=0.) -> bool:
+    client = PetClient(host, port)
     client.connect()
     filepath = os.path.join(MC_DIR, entry["filepath"])
 
@@ -177,14 +176,12 @@ def try_proof(entry, server_url, retry=1, failure_rate=0.) -> bool:
 
 
 @pytest.mark.validation
-def test_validation(server_url, stress_workers, stress_n):
+def test_validation(host, port, stress_workers, stress_n):
     selection = _load_subset_balanced(stress_n)
-
-    results = []
     
     with concurrent.futures.ProcessPoolExecutor(max_workers=stress_workers) as ex:
         future_to_expected = {
-            ex.submit(try_proof, entry, server_url): (entry['status'] == 'SUCCESS')
+            ex.submit(try_proof, entry, host, port): (entry['status'] == 'SUCCESS')
             for entry in selection
         }
 
@@ -193,18 +190,18 @@ def test_validation(server_url, stress_workers, stress_n):
         assert future.result() == expected
 
 @pytest.mark.replay
-def test_replay(server_url, stress_workers, stress_n):
+def test_replay(host, port, stress_workers, stress_n):
     selection = _load_subset_valid(stress_n)
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=stress_workers) as ex:
-        futures = [ex.submit(try_proof, entry, server_url, failure_rate=0.3) for entry in selection]
-        for f in concurrent.futures.as_completed(futures):
-            assert f.result()
+        futures = [ex.submit(try_proof, entry, host, port, failure_rate=0.3) for entry in selection]
+    for f in concurrent.futures.as_completed(futures):
+        assert f.result()
 
 
 @pytest.mark.manual_kill
-def test_manual_kill(server_url, stress_n):
+def test_manual_kill(host, port, stress_n):
     selection = _load_subset_valid(stress_n)
 
     for entry in selection:
-        assert try_proof_kill(entry, server_url)
+        assert try_proof_kill(entry, host, port)
