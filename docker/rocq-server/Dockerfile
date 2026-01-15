@@ -23,5 +23,4 @@ RUN git clone https://github.com/LLM4Rocq/pytanque.git pytanque-repo \
 
 RUN git clone https://github.com/LLM4Rocq/rocq-ml-toolbox.git \
  && cd rocq-ml-toolbox \
- && git switch develop \
- && /home/rocq/miniconda/envs/rocq-ml/bin/pip install -e .[server]
+ && /home/rocq/miniconda/envs/rocq-ml/bin/pip install -e .[all]
