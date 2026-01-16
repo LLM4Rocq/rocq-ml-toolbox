@@ -2,7 +2,7 @@ import os
 import traceback
 import logging
 
-from flask import Flask, request, jsonify, current_app
+from flask import Flask, request, jsonify, current_app, send_file
 from pytanque import PetanqueError
 from pytanque.protocol import (
     Opts,
@@ -12,7 +12,7 @@ from pytanque.protocol import (
 from ..rocq_lsp.client import LspClient
 from ..rocq_lsp.structs import TextDocumentItem
 from ..parser.utils.position import extract_subtext
-from ..parser.ast.driver import load_ast_dump
+from ..parser.ast.driver import generate_ast_dump_file
 from .client import StateExtended
 from .sessions import SessionManager, UnresponsiveError
 
@@ -424,12 +424,12 @@ def get_ast():
     Extract full AST (verbatim) from document at `path`.
     """
     data = request.get_json(force=True, silent=False)
-    err = require_json_fields(data, ["path"])
+    err = require_json_fields(data, ["path", "force_dump"])
     if err is not None:
         return err
     path = data["path"]
-    output = {"resp": load_ast_dump(path)}
-    return jsonify(output), 200
+    dump_path = generate_ast_dump_file(path, force_dump=data['force_dump'])
+    return send_file(dump_path, as_attachment=True)
 
 @app.route("/get_session", methods=["POST"])
 def get_session():

@@ -3,6 +3,7 @@ from typing import Dict, Tuple, List, Any, Optional, Set
 import functools
 from dataclasses import asdict, dataclass
 import requests
+import json
 
 from pytanque.protocol import (
     Opts,
@@ -276,18 +277,28 @@ class PetClient:
         else:
             raise ClientError(response.status_code, response.text)
 
-    def get_ast(self, path: str) -> List[VernacElement]:
+    @retry
+    def get_ast(self, path: str, force_dump=False, retry: int=0) -> List[VernacElement]:
         """
         Get AST of document at path `path`.
+        If `force_dump` is set to `True`, then force AST recomputing (may be necessary if the first time the AST was only partially generated.
         """
         url = f"{self.base_url}/get_ast"
-        payload = {'path': path}
-        response = requests.post(url, json=payload)
-        if response.status_code == 200:
-            output = response.json()
-            return parse_ast_dump(output['resp'])
-        else:
-            raise ClientError(response.status_code, response.text)
+        payload = {'path': path, 'force_dump': force_dump}
+        with requests.post(url, json=payload, stream=True) as response:
+            if response.status_code != 200:
+                raise ClientError(response.status_code, response.text)
+
+            tmp_path = "/tmp/ast_dump.json"
+            with open(tmp_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+        data = []
+        with open(tmp_path, "r", encoding="utf-8") as f:
+            for line in f:
+                data.append(json.loads(line))
+        return parse_ast_dump(data)
 
     @retry
     @check_states
