@@ -43,12 +43,20 @@ def run_fcc_astdump(filepath: str | Path, *, cfg: FccConfig = FccConfig()) -> Pa
         shutil.copy2(out, final_out)
     return final_out
 
-
-def load_ast_dump(filepath: str | Path, *, force: bool = False, cfg: FccConfig = FccConfig()) -> List[dict]:
+def generate_ast_dump_file(filepath: str | Path, *, force_dump: bool = False, cfg: FccConfig = FccConfig()) -> Path:
     filepath = Path(filepath)
     dump = ast_dump_path(filepath)
 
-    if force or not dump.exists():
+    if force_dump or not dump.exists():
+        run_fcc_astdump(filepath, cfg=cfg)
+
+    return dump
+
+def load_ast_dump(filepath: str | Path, *, force_dump: bool = False, cfg: FccConfig = FccConfig()) -> List[dict]:
+    filepath = Path(filepath)
+    dump = ast_dump_path(filepath)
+
+    if force_dump or not dump.exists():
         run_fcc_astdump(filepath, cfg=cfg)
 
     contents: List[dict] = []
@@ -81,7 +89,7 @@ def compute_ast(
     keep_raw: bool = False,
     cfg: FccConfig = FccConfig(),
 ) -> List[VernacElement]:
-    ast_dump = load_ast_dump(filepath, force=force_dump, cfg=cfg)
+    ast_dump = load_ast_dump(filepath, force_dump=force_dump, cfg=cfg)
     return parse_ast_dump(ast_dump, on_unsupported=on_unsupported, keep_raw=keep_raw)
 
 
