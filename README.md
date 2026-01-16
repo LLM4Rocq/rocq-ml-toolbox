@@ -1,52 +1,41 @@
 # rocq-ml-toolbox
-A toolbox providing Rocq environment generation, an inference server, and project-parsing tools for ML-oriented interaction with the Rocq prover.
 
----
+A toolbox for Rocq environments, scalable proof interaction, and project parsing for ML workflows.
 
-## Overview
+## Components
+- Docker: build and manage OPAM-based images, start Redis and the inference server in-container. See `src/rocq_ml_toolbox/docker/README.md`.
+- Inference: a Flask/Gunicorn server that orchestrates pet-server workers with Redis caching, plus a Python client. See `src/rocq_ml_toolbox/inference/README.md`.
+- Parser: proof and TOC extraction on top of the inference client. See `src/rocq_ml_toolbox/parser/README.md`.
+- Rocq LSP: minimal LSP client for coq-lsp/rocq-lsp to fetch AST data. See `src/rocq_ml_toolbox/rocq_lsp/README.md`.
 
-This repository brings together several components to simplify interaction with the Rocq proof assistant, especially for machine-learning workflows:
+## Quick start (local, no Docker)
+1) Install Python deps (plus pytanque):
 
-* **Docker environment creator**
-  Builds reproducible Rocq setups.
-
-* **Inference server**
-  Provides an API for sending commands to Rocq prover at scale. (overlay, based on Rocq-lsp/pétanque)
-
-* **Project parser**
-  Parses Rocq projects and extracts structured datasets. (based on previous works [crrrocq](), [llm4docq](), [goal2tac]()).
-
-Each component can be used independently or combined to form a pipeline for ML-based experimentation.
-
----
-
-## Repository Structure
-
-```
-rocq-ml-toolbox/
-├── rocq_docker/        # Build and manage Rocq environments
-├── inference_server/   # Inference server
-├── client/             # Client library for interacting with the server
-└── scraper/            # Tools for parsing Rocq projects
+```bash
+pip install -e .[server,parser,client]
+# Install pytanque separately and ensure `pet-server` is on PATH.
 ```
 
----
+2) Start Redis and the inference server:
 
-## Getting Started
+```bash
+docker run -d -p 6379:6379 redis:latest
+rocq-ml-server --num-pet-server 8 --workers 17
+```
 
-### Requirements
+3) Use the Python client:
 
-* Docker (for environment generation)
-* Python 3.9+ (for server, client, and scraper)
+```python
+from rocq_ml_toolbox.inference.client import PetClient
 
-### Quick Start
+client = PetClient("127.0.0.1", 5000)
+client.connect()
+state = client.get_state_at_pos("/path/to/file.v", line=10, character=0)
+state = client.run(state, "intros.")
+goals = client.goals(state)
+```
 
-TODO
-
----
-
-## Goals
-
-* Make Rocq more accessible for ML experimentation.
-* Provide reproducible and modular tooling.
-* Enable efficient project scraping and dataset generation.
+## Notebooks
+- `notebooks/itp.ipynb`: interactive theorem proving at scale.
+- `notebooks/scrapping.ipynb`: dataset extraction without Docker.
+- `notebooks/docker.ipynb`: building and using custom Docker images.
