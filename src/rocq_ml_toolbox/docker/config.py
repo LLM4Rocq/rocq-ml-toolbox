@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, Self
+from typing import Dict, Self, List, Any
 
 import yaml
 
@@ -26,3 +26,4 @@ class OpamConfig(DockerConfig):
     packages: list[str]
     pins: list[str] = field(default_factory=list)
     info_path: Dict[str, str] = field(default_factory=dict)
+    targets: List[str] = field(default_factory=list)
