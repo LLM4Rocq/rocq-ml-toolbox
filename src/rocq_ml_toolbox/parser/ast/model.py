@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 from pytanque.protocol import Range
 
 @dataclass
@@ -10,11 +10,42 @@ class Span:
     bp: int
     ep: int
 
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> Span:
+        """Build a Span from a dictionary representation."""
+        return cls(
+            bp=d['bp'],
+            ep=d['ep']
+        )
+
+    def to_json(self) -> Any:
+        return {
+            "bp": self.bp,
+            "ep": self.ep
+        }
+
+
 @dataclass(kw_only=True)
 class AstNode:
     span: Optional[Span]=None
     range: Optional[Range]=None
     name: Optional[str]=None
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> Span:
+        """Build an AstNode from a dictionary representation."""
+        return cls(
+            span=Span.from_json(d['span']) if 'span' in d else None,
+            range=Span.from_json(d['range']) if 'range' in d else None,
+            name=Span.from_json(d['name']) if 'name' in d else None
+        )
+
+    def to_json(self) -> Any:
+        return {
+            "span": self.span.to_json(),
+            "range": self.range.to_json(),
+            "name": self.name
+        }
 
 class VernacKind(StrEnum):
     REQUIRE = auto()
@@ -80,6 +111,7 @@ class VernacKind(StrEnum):
     CONSTANT = auto()
     FIELD = auto()
     CONSTRUCTOR = auto()
+    
 
 @dataclass
 class VernacElement(AstNode):
@@ -87,7 +119,54 @@ class VernacElement(AstNode):
     members: Optional[list[VernacElement]]=field(default_factory=list)
     data: dict[str, Any]=field(default_factory=dict)
 
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> VernacElement:
+        return cls(
+            span=Span.from_json(d["span"]) if d["span"] else None,
+            range=Range.from_json(d["range"]) if d["range"] else None,
+            name=d["name"],
+            kind=VernacKind(d["kind"]),
+            members=[cls.from_json(el) for el in d.get("members", [])],
+            data=d.get("data", {}),
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "span": self.span.to_json() if self.span else None,
+            "range": self.range.to_json() if self.range else None,
+            "name": self.name,
+            "kind": self.kind.value,
+            "members": [el.to_json() for el in self.members],
+            "data": self.data,
+        }
+
+
 @dataclass(kw_only=True)
 class UnsupportedNode(VernacElement):
     keyword: str
     raw: dict[str, Any] | list[Any] | Any
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> UnsupportedNode:
+        return cls(
+            span=Span.from_json(d["span"]) if "span" in d else None,
+            range=Range.from_json(d["range"]) if "range" in d else None,
+            name=d["name"],
+            kind=VernacKind(d["kind"]),
+            members=[VernacElement.from_json(el) for el in d.get("members", [])],
+            data=d.get("data", {}),
+            keyword=d["keyword"],
+            raw=d["raw"],
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "span": self.span.to_json() if self.span else None,
+            "range": self.range.to_json() if self.range else None,
+            "name": self.name,
+            "kind": self.kind.value,
+            "members": [el.to_json() for el in self.members],
+            "data": self.data,
+            "keyword": self.keyword,
+            "raw": self.raw,
+        }
