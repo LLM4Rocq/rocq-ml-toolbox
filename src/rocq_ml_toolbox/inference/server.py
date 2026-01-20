@@ -195,7 +195,7 @@ def complete_goals():
     
     data['state_ext'] = StateExtended.from_json(data['state_ext'])
     goals = session_manager.complete_goals(**data)
-    output = {"resp": goals}
+    output = {"resp": goals.to_json()}
     return jsonify(output), 200
 
 @app.route("/premises", methods=["POST"])
@@ -415,7 +415,7 @@ def get_document():
     
     text_utf8 = item.text.encode("utf-8")
     for ranged_span in fleche_document.spans:
-        ranged_span.span = extract_subtext(text_utf8, ranged_span.range)
+        ranged_span.span = extract_subtext(text_utf8, ranged_span.range).decode("utf-8")
     return jsonify(fleche_document.to_json()), 200
 
 @app.route("/get_ast", methods=["POST"])

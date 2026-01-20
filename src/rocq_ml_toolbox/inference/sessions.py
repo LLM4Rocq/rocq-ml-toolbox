@@ -488,7 +488,7 @@ class SessionManager:
             state_ext=state_ext
         )
 
-    def complete_goals(self, session_id: str, state_ext: StateExtended, pretty=True, failure=False, timeout=10) -> List[Dict]:
+    def complete_goals(self, session_id: str, state_ext: StateExtended, pretty=True, failure=False, timeout=10) -> GoalsResponse:
         """Gather complete goals associated to a state. See pytanque documentation for more details."""
         def op(sess: Session, worker: Pytanque, lock:Lock, state_ext: StateExtended):
             lock.extend(timeout+self.timeout_eps, replace_ttl=True)
