@@ -1,22 +1,22 @@
 from ..parser import Range, Position, ParserError
 
-def pos_to_offset(content: bytes, p: Position) -> int:
+def pos_to_offset(content_utf_8: bytes, p: Position) -> int:
     """
     Convert a Position (line/character) to a byte offset in UTF-8 content.
 
     - line is 0-based
     - character is a 0-based *byte index* within the line
     """
-    lines = content.splitlines(keepends=True)
+    lines = content_utf_8.splitlines(keepends=True)
     if p.line < 0 or len(lines) <= p.line:
-        return len(content)
+        return len(content_utf_8)
     offset = sum(len(lines[i]) for i in range(p.line))
     line_no_nl = lines[p.line].rstrip(b"\r\n")
     if p.character < 0 or len(line_no_nl) < p.character:
         raise ParserError(f"character out of bounds: {p.character} on line {p.line}")
     return offset + p.character
 
-def offset_to_pos(content: str, offset: int) -> Position:
+def offset_to_pos(content_utf_8: bytes, offset: int) -> Position:
     """
     Convert a byte offset in UTF-8 content to a Position (line/character).
 
@@ -26,7 +26,7 @@ def offset_to_pos(content: str, offset: int) -> Position:
     if offset < 0:
         raise ParserError(f"offset out of bounds: {offset}")
 
-    lines = content.splitlines(keepends=True)
+    lines = content_utf_8.splitlines(keepends=True)
 
     remaining = offset
     for i, line in enumerate(lines):
@@ -42,17 +42,17 @@ def offset_to_pos(content: str, offset: int) -> Position:
     else:
         return Position(line=0, character=0)
 
-def extract_subtext(content: bytes, r: Range) -> bytes:
+def extract_subtext(content_utf_8: bytes, r: Range) -> bytes:
     """
     Extract substring defined by Range (line/character), where:
       - line is 0-based
       - character is a 0-based *byte index* within that line
       - end is treated as exclusive
     """
-    start_off = pos_to_offset(content, r.start)
-    end_off = pos_to_offset(content, r.end)
+    start_off = pos_to_offset(content_utf_8, r.start)
+    end_off = pos_to_offset(content_utf_8, r.end)
 
-    return content[start_off:end_off]
+    return content_utf_8[start_off:end_off]
 
 
 def move_position(content: bytes, pos: Position, length: int) -> Position:
