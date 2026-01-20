@@ -29,7 +29,7 @@ def run_fcc_astdump(filepath: str | Path, *, cfg: FccConfig = FccConfig()) -> Pa
         tmpdir = Path(tmpdir)
 
         tmp_src = tmpdir / filepath.name
-        shutil.copy2(filepath, tmp_src)
+        shutil.copy(filepath, tmp_src)
 
         out = ast_dump_path(tmp_src)
 
@@ -40,7 +40,7 @@ def run_fcc_astdump(filepath: str | Path, *, cfg: FccConfig = FccConfig()) -> Pa
             raise RuntimeError(f"Expected ast dump not found: {out}")
 
         final_out = ast_dump_path(filepath)
-        shutil.copy2(out, final_out)
+        shutil.copy(out, final_out)
     return final_out
 
 def generate_ast_dump_file(filepath: str | Path, *, force_dump: bool = False, cfg: FccConfig = FccConfig()) -> Path:
