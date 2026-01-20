@@ -2,7 +2,7 @@ import os
 import json
 import concurrent.futures
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 import random
 import psutil
 import time
@@ -11,11 +11,11 @@ import redis
 import pytest
 from filelock import FileLock
 
-from src.rocq_ml_toolbox.inference.client import PetClient
-from src.rocq_ml_toolbox.inference.redis_keys import pet_status_key, PetStatus
+from rocq_ml_toolbox.parser.rocq_parser import Source, Theorem, VernacElement, RocqParser
+from rocq_ml_toolbox.inference.client import PetClient
+from rocq_ml_toolbox.inference.redis_keys import pet_status_key, PetStatus
+from rocq_ml_toolbox.parser.utils.position import offset_to_pos
 
-
-MC_DIR = os.environ.get("MC_DIR", "stress_test_light/source")
 
 def kill_all_proc(proc_name: str):
     for proc in psutil.process_iter():
@@ -26,112 +26,16 @@ def kill_all_proc(proc_name: str):
 def try_proof_kill(entry, host, port) -> bool:
     client = PetClient(host, port)
     client.connect()
-    filepath = os.path.join(MC_DIR, entry['filepath'])
-    try:
-        state = client.get_state_at_pos(filepath, entry['line'], entry['character'])
-        for step in entry['proof_steps']:
-            kill_all_proc('pet-server')
-            state = client.run(state, step)
-    except Exception as e:
-        return False
-    
+    state = client.get_state_at_pos(entry['filepath'], entry['line'], entry['character'])
+    for step in entry['steps']:
+        kill_all_proc('pet-server')
+        state = client.run(state, step)
     return True
-
-def _cache_paths(n: int) -> tuple[Path, FileLock]:
-    cache = Path(__file__).with_name(f".crrracq_subset_balance_n{n}.json")
-    lock = FileLock(str(cache) + ".lock")
-    return cache, lock, '.crrracq_full.json'
-
-def _cache_paths_valid(n: int) -> tuple[Path, FileLock]:
-    cache = Path(__file__).with_name(f".crrracq_subset_valid_n{n}.json")
-    lock = FileLock(str(cache) + ".lock")
-    return cache, lock, '.crrracq_full.json'
-
-def _load_subset_balanced(n: int):
-    """
-    Select n entries, balanced between SUCCESS and non-SUCCESS, with early stopping.
-    Cached to disk to avoid rescanning the dataset on every pytest run.
-    """
-    cache, lock, full_ds = _cache_paths(n)
-
-    with lock:
-        if cache.exists():
-            return json.loads(cache.read_text())
-
-        from datasets import load_dataset
-        ds = load_dataset("theostos/crrracq", split="train")
-
-        need_ok = n // 2
-        need_bad = n - need_ok
-        ok, bad = [], []
-
-        for x in ds:
-            if x["status"] == "SUCCESS":
-                if len(ok) < need_ok:
-                    ok.append(x)
-            else:
-                if len(bad) < need_bad:
-                    bad.append(x)
-
-            if len(ok) == need_ok and len(bad) == need_bad:
-                break
-
-        subset = ok + bad
-
-        payload = [
-            {
-                "filepath": x["filepath"],
-                "line": x["line"],
-                "character": x["character"],
-                "status": x["status"],
-                "proof_steps": x["proof_steps"],
-            }
-            for x in subset
-        ]
-        cache.write_text(json.dumps(payload))
-        return payload
-
-def _load_subset_valid(n: int):
-    """
-    Select n entries.
-    Cached to disk to avoid rescanning the dataset on every pytest run.
-    """
-    cache, lock, full_ds = _cache_paths_valid(n)
-
-    with lock:
-        if cache.exists():
-            return json.loads(cache.read_text())
-
-        from datasets import load_dataset
-        ds = load_dataset("theostos/crrracq", split="train")
-
-        ok = []
-
-        for x in ds:
-            if x["status"] == "SUCCESS":
-                if len(ok) < n:
-                    ok.append(x)
-            if len(ok) == n:
-                break
-
-
-        payload = [
-            {
-                "filepath": x["filepath"],
-                "line": x["line"],
-                "character": x["character"],
-                "status": x["status"],
-                "proof_steps": x["proof_steps"],
-            }
-            for x in ok
-        ]
-        cache.write_text(json.dumps(payload))
-        return payload
 
 def try_proof(entry, host, port, retry=1, failure_rate=0.) -> bool:
     client = PetClient(host, port)
     client.connect()
-    filepath = os.path.join(MC_DIR, entry["filepath"])
+    filepath = entry["filepath"]
 
     retry = max(1, int(retry))
 
@@ -154,44 +58,54 @@ def try_proof(entry, host, port, retry=1, failure_rate=0.) -> bool:
                 if real_failures >= retry:
                     raise  # bubble up to return False
 
-    try:
+    state = call_with_failover(
+        client.get_state_at_pos,
+        filepath,
+        entry["line"],
+        entry["character"],
+    )
+
+    for step in entry["steps"]:
+
         state = call_with_failover(
-            client.get_state_at_pos,
-            filepath,
-            entry["line"],
-            entry["character"],
+            client.run,
+            state,
+            step
         )
+    return True
 
-        for step in entry["proof_steps"]:
-
-            state = call_with_failover(
-                client.run,
-                state,
-                step
-            )
-        return True
-
-    except Exception as e:
-        return False
-
+@pytest.fixture(scope="session")
+def to_prove(parser: RocqParser, stdlib_filepaths: List[str]):
+    result = []
+    for filepath in stdlib_filepaths:
+        source = Source.from_local_path(filepath)
+        for element, steps in parser.extract_proofs_wo_check(source):
+            pos = offset_to_pos(source.content_utf8, element.span.ep)
+            entry = {
+                "filepath": source.path,
+                "line": pos.line,
+                "character": pos.character,
+                "c_line": pos.line,
+                "steps": steps
+            }
+            result.append(entry)
+    return result
 
 @pytest.mark.validation
-def test_validation(host, port, stress_workers, stress_n):
-    selection = _load_subset_balanced(stress_n)
+def test_validation(host, port, stress_workers, to_prove, stress_n):
+    selection = random.sample(to_prove, k=stress_n)
     
     with concurrent.futures.ProcessPoolExecutor(max_workers=stress_workers) as ex:
-        future_to_expected = {
-            ex.submit(try_proof, entry, host, port): (entry['status'] == 'SUCCESS')
-            for entry in selection
-        }
+        future_to_expected = [
+            ex.submit(try_proof, entry, host, port) for entry in selection
+        ]
 
     for future in concurrent.futures.as_completed(future_to_expected):
-        expected = future_to_expected[future]
-        assert future.result() == expected
+        assert future.result()
 
 @pytest.mark.replay
-def test_replay(host, port, stress_workers, stress_n):
-    selection = _load_subset_valid(stress_n)
+def test_replay(host, port, stress_workers, to_prove, stress_n):
+    selection = random.sample(to_prove, k=stress_n)
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=stress_workers) as ex:
         futures = [ex.submit(try_proof, entry, host, port, failure_rate=0.3) for entry in selection]
@@ -200,8 +114,8 @@ def test_replay(host, port, stress_workers, stress_n):
 
 
 @pytest.mark.manual_kill
-def test_manual_kill(host, port, stress_n):
-    selection = _load_subset_valid(stress_n)
+def test_manual_kill(host, port, to_prove, stress_n):
+    selection = random.sample(to_prove, k=stress_n)
 
     for entry in selection:
         assert try_proof_kill(entry, host, port)

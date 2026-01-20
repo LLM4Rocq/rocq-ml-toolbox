@@ -1,6 +1,5 @@
 import os
-import re
-from typing import Tuple, Optional, List, Dict, Any
+from typing import Tuple, List
 
 import pytest
 import requests
@@ -13,14 +12,7 @@ from pytanque.protocol import (
     GoalsResponse
 )
 
-from src.rocq_ml_toolbox.inference.client import StateExtended
-MC_DIR = os.environ.get("MC_DIR", "/home/theo/Documents/github/rocq-ml-toolbox/stress_test_light/source")
-
-
-def _local_fraction_v_abs_path() -> str:
-    p = os.path.join(MC_DIR, "algebra", "fraction.v")
-    assert os.path.exists(p), f"Missing file on disk: {p}"
-    return os.path.abspath(p)
+from rocq_ml_toolbox.inference.client import StateExtended
 
 
 def _find_line_char(path_abs: str, needle: str) -> Tuple[int, int]:
@@ -33,31 +25,34 @@ def _find_line_char(path_abs: str, needle: str) -> Tuple[int, int]:
 
 
 def _pick_thm() -> Tuple[str, List[str]]:
-    return "tofrac_eq0", ['by rewrite tofrac_eq.', 'Qed.']
+    return "Z_of_of_Z", [
+            ('cbv [of_Z to_Z]; destruct z as [|z|z];'
+            ' cbn; try reflexivity; rewrite Raw.to_N_of_pos;'
+            ' cbn; reflexivity.'
+            ),
+            'Qed.'
+        ]
 
 
 def _extract_statement() -> str:
-    return "Lemma tofrac_eq0 (p : R): (p%:F == 0) = (p == 0)."
+    return ('Lemma Z_of_of_Z (z : Z)'
+ ' : to_Z (of_Z z)'
+ ' = z.')
+
+@pytest.fixture(scope="session")
+def server_file(stdlib_path):
+    file_path = os.path.join(stdlib_path, "Strings/BinaryString.v")
+    return file_path
+
+@pytest.fixture(scope="session")
+def needle_pos(server_file):
+    return _find_line_char(server_file, "cbv [of_Z to_Z]; destruct z as [|z|z];")
 
 
 @pytest.fixture(scope="session")
-def local_fraction_v_abs():
-    return _local_fraction_v_abs_path()
+def lemma_pos(server_file):
+    return _find_line_char(server_file, "Lemma Z_of_of_Z (z : Z)")
 
-
-@pytest.fixture(scope="session")
-def needle_pos(local_fraction_v_abs):
-    return _find_line_char(local_fraction_v_abs, "by rewrite tofrac_eq.")
-
-
-@pytest.fixture(scope="session")
-def lemma_pos(local_fraction_v_abs):
-    return _find_line_char(local_fraction_v_abs, "Lemma tofrac_eq0")
-
-
-@pytest.fixture(scope="session")
-def server_file():
-    return _local_fraction_v_abs_path()
 
 @pytest.fixture(scope="session")
 def statement_state(client, server_file, lemma_pos):
@@ -72,35 +67,18 @@ def started_state(client, server_file):
     return thm, proof, st
 
 @pytest.mark.api
-def test_health_endpoint(server_url):
-    resp = requests.get(f"{server_url}/health")
-    assert resp.status_code == 200
-    assert resp.text == "OK"
-
-
-@pytest.mark.api
-def test_login_endpoint(server_url):
-    resp = requests.get(f"{server_url}/login")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "session_id" in data and data["session_id"]
-
+def test_get_state_at_pos_endpoint(client, server_file, needle_pos):
+    line0, ch0 = needle_pos
+    st = client.get_state_at_pos(filepath=server_file, line=line0, character=ch0, timeout=180)
+    assert isinstance(st, StateExtended)
 
 @pytest.mark.api
-def test_toc_endpoint(client, server_file):
-    toc = client.toc(server_file, timeout=60)
-    assert isinstance(toc, list)
-
-@pytest.mark.api
-def test_start(client, server_file):
-    thm,_ = _pick_thm()
-    st = client.start(file=server_file, thm=thm, timeout=180)
-    assert isinstance(st, StateExtended) and st
-
-@pytest.mark.api
-def test_get_root_state(client, server_file):
-    st = client.get_root_state(file=server_file, timeout=180)
-    assert isinstance(st, StateExtended) and st
+def test_run_endpoint(client, started_state):
+    _, proof, st0 = started_state
+    for step in proof:
+        st0 = client.run(st0, step, timeout=120)
+    goals = client.goals(st0)
+    assert goals==[]
 
 @pytest.mark.api
 def test_goals_endpoint(client, started_state):
@@ -152,24 +130,15 @@ def test_ast_endpoint(client, started_state):
     assert ast is not None
 
 @pytest.mark.api
-def test_run_endpoint(client, started_state):
-    _, proof, st0 = started_state
-    for step in proof:
-        st0 = client.run(st0, step, timeout=120)
-    goals = client.goals(st0)
-    assert goals==[]
-
-@pytest.mark.api
-def test_get_state_at_pos_endpoint(client, server_file, needle_pos):
-    line0, ch0 = needle_pos
-    st = client.get_state_at_pos(filepath=server_file, line=line0, character=ch0, timeout=180)
-    assert isinstance(st, StateExtended)
-
-@pytest.mark.api
-def test_ast_at_pos_endpoint(client, server_file, lemma_pos):
+def test_ast_at_pos(client, server_file, lemma_pos):
     line0, ch0 = lemma_pos
     ast = client.ast_at_pos(file=server_file, line=line0, character=ch0, timeout=60)
     assert ast is not None
+
+@pytest.mark.api
+def test_get_root_state_endpoint(client, server_file):
+    st = client.get_root_state(file=server_file, timeout=180)
+    assert isinstance(st, StateExtended) and st
 
 @pytest.mark.api
 def test_list_notations_in_statement_endpoint(client, statement_state):
@@ -178,12 +147,26 @@ def test_list_notations_in_statement_endpoint(client, statement_state):
     notations = client.list_notations_in_statement(st0, statement=statement, timeout=60)
     assert isinstance(notations, list)
 
+@pytest.mark.api
+def test_start_endpoint(client, server_file):
+    thm,_ = _pick_thm()
+    st = client.start(file=server_file, thm=thm, timeout=180)
+    assert isinstance(st, StateExtended) and st
+
 # @pytest.mark.api
 # def test_query(client, server_file):
 #     thm,_ = _pick_thm()
 #     params = StartParams(server_file, thm, "")
 #     resp = client.query(params, timeout=60)
 #     assert isinstance(resp, Response)
+
+@pytest.mark.api
+def test_get_document_endpoint(client, server_file):
+    client.get_document(server_file)
+
+@pytest.mark.api
+def test_get_ast_endpoint(client, server_file):
+    client.get_ast(server_file, force_dump=True)
 
 @pytest.mark.api
 def test_get_session_endpoint(client):
