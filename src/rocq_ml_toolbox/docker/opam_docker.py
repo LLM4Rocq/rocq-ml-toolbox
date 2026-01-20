@@ -17,7 +17,7 @@ from ..parser.parser import Source
 class OpamDocker(BaseDocker):
     """Wraps Docker interactions for extracting data from an OPAM switch."""
 
-    def __init__(self, config:OpamConfig, redis_image: str= "redis:latest", redis_port:int = 6379, rebuild=False, kill_clone=True):
+    def __init__(self, config:OpamConfig, redis_image: str= "redis:latest", redis_port:int = 6379, rebuild=False, kill_clone=True, update_rocq_ml=False):
         """Start or reuse a container built from the given OPAM configuration."""
         super().__init__(config, kill_clone=kill_clone, rebuild=rebuild)
         if kill_clone: self._kill_clone(redis_image)
@@ -30,6 +30,14 @@ class OpamDocker(BaseDocker):
         self.opam_env_path = config.opam_env_path
         self.config = config
         self.write_file('/tmp/init.v', '\n')
+
+        if update_rocq_ml:
+            self.exec_cmd([
+                "bash",
+                "-lc",
+                "cd ~/rocq-ml-toolbox && git pull"
+            ])
+
 
     def install_project(self, project: str, extra_args: str = ""):
         """Install OPAM packages inside the container image."""
@@ -74,16 +82,16 @@ class OpamDocker(BaseDocker):
 
         self.container.commit(self.config.name, self.config.tag)
 
-    def start_inference_server(self, port=5000, workers=9, timeout=30, num_pet_server=4, pet_server_start_port=8765, max_ram_per_pet=3072):
+    def start_inference_server(self, port=5000, workers=9, timeout=600, num_pet_server=4, pet_server_start_port=8765, max_ram_per_pet=3072):
         """Launch pet-server inside the container."""
         self.pet_port = port
         cmd = f"""
-        eval "$(/home/rocq/miniconda/bin/conda shell.bash hook)"
+        eval "$(/home/{self.config.user}/miniconda/bin/conda shell.bash hook)"
         conda activate rocq-ml
-        nohup rocq-ml-server -p {port} -w {workers} -t {timeout} \
+        rocq-ml-server -d -p {port} -w {workers} -t {timeout} \
         --num-pet-server {num_pet_server} \
         --pet-server-start-port {pet_server_start_port} \
-        --max-ram-per-pet {max_ram_per_pet} &
+        --max-ram-per-pet {max_ram_per_pet}
         """
 
         self.exec_cmd(["bash", "-lc", cmd])
