@@ -1,4 +1,4 @@
-name: theostos/coq-mathcomp
+name: theostos/rocq-test
 tag: '9.0'
 base_image: theostos/rocq-server:9.0
 user: rocq
