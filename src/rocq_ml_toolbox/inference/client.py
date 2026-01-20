@@ -278,26 +278,19 @@ class PetClient:
             raise ClientError(response.status_code, response.text)
 
     @retry
-    def get_ast(self, path: str, force_dump=False, retry: int=0) -> List[VernacElement]:
-        """
-        Get AST of document at path `path`.
-        If `force_dump` is set to `True`, then force AST recomputing (may be necessary if the first time the AST was only partially generated.
-        """
+    def get_ast(self, path: str, force_dump=False, retry: int = 0) -> List[VernacElement]:
         url = f"{self.base_url}/get_ast"
-        payload = {'path': path, 'force_dump': force_dump}
+        payload = {"path": path, "force_dump": force_dump}
+
+        data = []
         with requests.post(url, json=payload, stream=True) as response:
             if response.status_code != 200:
                 raise ClientError(response.status_code, response.text)
 
-            tmp_path = "/tmp/ast_dump.json"
-            with open(tmp_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-        data = []
-        with open(tmp_path, "r", encoding="utf-8") as f:
-            for line in f:
-                data.append(json.loads(line))
+            for line in response.iter_lines(decode_unicode=True):
+                if line:
+                    data.append(json.loads(line))
+
         return parse_ast_dump(data)
 
     @retry
