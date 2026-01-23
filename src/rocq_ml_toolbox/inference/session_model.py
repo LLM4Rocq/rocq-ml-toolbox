@@ -1,8 +1,9 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 import json
-from typing import List, Union, Any, Dict
+from typing import List, Union, Any, Dict, Optional
 
+from pytanque.routes import RouteName
 from pytanque.client import Params, State
 from redis import Redis
 
@@ -58,20 +59,23 @@ class RedisSerializable:
 
 @dataclass
 class QueryKwargs:
+    route_name: RouteName
     params: Params
-    route: str
+    timeout: float
 
     @classmethod
-    def from_json(cls, data: dict) -> QueryKwargs:
+    def from_json(cls, data: dict) -> "QueryKwargs":
         return cls(
-            params=Params.from_json(data.get('params')),
-            route=data.get('route')
+            route_name=RouteName(data["route_name"]),
+            params=Params.from_json(data["params"]),
+            timeout=float(data["timeout"]),
         )
-    
+
     def to_json(self) -> dict:
         return {
+            "route_name": self.route_name.value,
             "params": self.params.to_json(),
-            "route": self.route
+            "timeout": self.timeout,
         }
 
 @dataclass
@@ -80,31 +84,29 @@ class TacticsParent(RedisSerializable):
     Parent node, associated to a set of params to generate it.
     """
     state_key: str
-    generation: int
     query_kwargs: QueryKwargs
-    children: List[TacticsTree]
+    children: List[TacticsTree]=field(default_factory=list)
     redis_key = "tactics_tree"
 
-    def find_node(self, state_key: str) -> TacticsTree | None:
+    def find_node(self, state_key: str) -> TacticsParent | TacticsTree:
+        if self.state_key == state_key:
+            return self
         stack = list(self.children)
         while stack:
             node = stack.pop()
             if node.state_key == state_key:
                 return node
             stack.extend(node.children)
-        return None
+        raise Exception("State not found")
 
     def find_path(self, state: StateExtended) -> list[TacticsTree]:
         state_key = state.key
         node = self.find_node(state_key)
-        if node is None:
-            raise Exception("State not found")
         return node.trace_ancestors(node)
 
     def to_json(self) -> Any:
         return {
             "state_key": self.state_key,
-            "generation": self.generation,
             "query_kwargs": self.query_kwargs.to_json(),
             "children": [child.to_json() for child in self.children],
         }
@@ -113,7 +115,6 @@ class TacticsParent(RedisSerializable):
     def from_json(cls, data: dict) -> TacticsParent:
         parent = cls(
             state_key=data.get("state_key"),
-            generation=data.get("generation"),
             query_kwargs=QueryKwargs.from_json(data["query_kwargs"]),
             children=[]
         )
@@ -132,7 +133,6 @@ class TacticsTree:
     """
     state_key: str
     tactic: str
-    generation: int
     parent: Union[TacticsParent, TacticsTree]
     children: List[TacticsTree]=field(default_factory=list)
 
@@ -161,7 +161,6 @@ class TacticsTree:
         return {
             "state_key": self.state_key,
             "tactic": self.tactic,
-            "generation": self.generation,
             "children": [child.to_dict() for child in self.children]
         }
     
@@ -174,7 +173,6 @@ class TacticsTree:
         node = cls(
             state_key=data["state_key"],
             tactic=data["tactic"],
-            generation=data["generation"],
             parent=parent,
             children=[]
         )
@@ -201,14 +199,21 @@ class MappingState(RedisSerializable):
             "mapping": {k: v.to_json() for k,v in self.mapping.items()}
         }
     
-    def __contains__(self, state: StateExtended):
-        state_key = state.key
-        return state_key in self.mapping
-    
-    def __getitem__(self, state: StateExtended) -> StateExtended:
-        state_key = state.key
+    def _key(self, state_or_key: Union[StateExtended, str]) -> str:
+        return state_or_key if isinstance(state_or_key, str) else state_or_key.key
+
+    def __getitem__(self, state_or_key: Union[StateExtended, str]) -> StateExtended:
+        state_key = self._key(state_or_key)
         return self.mapping[state_key]
     
+    def __contains__(self, state_or_key: Union[StateExtended, str]):
+        state_key = self._key(state_or_key)
+        return state_key in self.mapping
+
+    def get(self, state_or_key: Union[StateExtended, str], default: Optional[StateExtended] = None):
+        state_key = self._key(state_or_key)
+        return self.mapping.get(state_key, default)
+
     def add(self, state: StateExtended):
         state_key = state.key
         self.mapping[state_key] = state
