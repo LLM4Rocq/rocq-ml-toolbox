@@ -1,12 +1,19 @@
 from __future__ import annotations
 import time
-from typing import List, Optional, Dict, Tuple, Any, Iterator
+from typing import List, Optional, Dict, Tuple, Any, Iterator, cast
 from contextlib import contextmanager
+from functools import singledispatchmethod
+from dataclasses import fields
 import json
 import uuid
 
+
 from pytanque import Pytanque, PetanqueError
 from pytanque.client import Params, Responses
+from pytanque.response import BaseResponse, SessionResponse
+from pytanque.params import SessionParams, PrimitiveParams
+from pytanque.routes import RouteName
+
 from .rpc_registry import rpc
 
 import redis
@@ -22,7 +29,14 @@ from .redis_keys import (
     archived_sessions_key,
     session_assigned_idx_key
 )
-from .session_model import TacticsParent, MappingState, Session, StateExtended
+from .session_model import TacticsParent, TacticsTree, MappingState, Session, StateExtended, QueryKwargs
+
+def require_session_response(res: BaseResponse, *, params: Params, route: RouteName) -> SessionResponse:
+    if not isinstance(res, SessionResponse):
+        raise SessionManagerError(
+            f"{type(params).__name__} on {route} expects SessionResponse, got {type(res).__name__}"
+        )
+    return cast(SessionResponse, res)
 
 class SessionManagerError(Exception):
     def __init__(self, message, require_restart=False):
@@ -139,6 +153,36 @@ class SessionManager:
         self.sessions_cache[session.id] = session
         return session.id
     
+    def mapping_state_cache_update(self, state: StateExtended, session: Session):
+        """
+        Update mapping_state_cache if the state is both outdated and not in it.
+        """
+        current_generation = self.get_generation(session.pet_idx)
+        if state.generation == current_generation:
+            return
+        mapping_state = self.mappings_state_cache[session.id]
+        if state in mapping_state:
+            state_map = mapping_state[state]
+            if state_map.generation == current_generation:
+                return
+        # Since it didn't work, let's update MappingState cache
+        self.mappings_state_cache[session.id] = MappingState.from_redis(session, self.redis_client)
+    
+    def tactics_tree_cache_update(self, state: StateExtended, session: Session):
+        """
+        Update tactics_trees_cache if the state is both outdated and not in it.
+        """
+        current_generation = self.get_generation(session.pet_idx)
+        if state.generation == current_generation:
+            return
+        tactics_tree = self.tactics_trees_cache[session.id]
+        try:
+            tactics_tree.find_path(state)
+        except Exception:
+            # state not found, let's update it.
+            self.tactics_trees_cache[session.id] = TacticsParent.from_redis(session, self.redis_client)
+
+
     def update_state(self, state: StateExtended, session: Session, lock:Lock, timeout_run=60, timeout_get_state=120) -> StateExtended:
         """If state.generation is outdated, replay the tactics to recreate cache states on current pet-server."""
         current_generation = self.get_generation(session.pet_idx)
@@ -146,25 +190,41 @@ class SessionManager:
             return session # No need to replay
         worker = self._get_worker(session.pet_idx)
 
+        self.mapping_state_cache_update(state, session)
         mapping_state = self.mappings_state_cache[session.id]
         if state in mapping_state:
             state_map = mapping_state[state]
             if state_map.generation == current_generation:
                 return state_map
         
+        self.tactics_tree_cache_update(state, session)
         tactics_tree = self.tactics_trees_cache[session.id]
-        state_ext = None
         if tactics_tree:
             lock.extend(timeout_get_state+self.timeout_eps, replace_ttl=True)
             replay_session = tactics_tree.find_path(state)
-            state = worker.query(**vars(tactics_tree.query_kwargs))
+            state_ext = mapping_state.get(tactics_tree.state_key, None)
+
+            # if state_ext is outdated or None then regenerate it
+            if not state_ext or state_ext.generation < current_generation:
+                query_res = worker.query(**vars(tactics_tree.query_kwargs))
+                res = worker.extract_response(tactics_tree.query_kwargs.route_name, query_res)
+                if not isinstance(res, SessionResponse):
+                    raise SessionManagerError(f"Tactics tree is assocaited to {tactics_tree.query_kwargs}, which doesn't corresponds to a `SessionResponse`")
+                state = res.extract_response()
+                state_ext = StateExtended.from_state(state, current_generation)
+                mapping_state.add(state_ext)
+            
             for node in replay_session:
                 lock.extend(timeout_run+self.timeout_eps, replace_ttl=True)
-                state = worker.run(state, node.tactic, timeout=timeout_run)
-                mapping_state.add(state_ext)
+                state_ext = mapping_state.get(node.state_key, None)
+                # if state_ext is outdated or None then regenerate it
+                if not state_ext or state_ext.generation < current_generation:
+                    state = worker.run(state, node.tactic, timeout=timeout_run)
+                    state_ext = StateExtended.from_state(state, current_generation)
+                    mapping_state.add(state_ext)
+            mapping_state.to_redis(session,self.redis_client)
         else:
             raise SessionManagerError(f"Session {session.id} doesn't have any TacticsParent")
-        state_ext = StateExtended.from_state(state, current_generation)
         return state_ext
     
     def send_kill_signal(self, pet_idx: int):
@@ -178,23 +238,23 @@ class SessionManager:
         session_id: str,
         params: Params
     ) -> Iterator[Tuple[Session, Pytanque, Lock, Params]]:
-        sess = self.get_session(session_id)
-        pet_idx = sess.pet_idx
+        session = Session.from_redis(session_id, self.redis_client)
+        pet_idx = session.pet_idx
         lock: Optional[Lock] = None
         try:
             lock = self.acquire_pet_lock(pet_idx, timeout=self.timeout_ok + self.timeout_eps)
             self.ensure_pet_ok(pet_idx, timeout=self.timeout_ok)
-            sess = self.get_session(session_id)
+            # in rare cases pet server may have crashed between the first `from_redis`, and the Lock acquire
+            session = Session.from_redis(session_id, self.redis_client)
+            worker = self._get_worker(session.pet_idx)
+            
+            for field in fields(params):
+                state = getattr(params, field.name)
+                if isinstance(state, StateExtended):
+                    new_state = self.update_state(state, session)
+                    setattr(params, field.name, new_state)
 
-            worker = self._get_worker(sess.pet_idx)
-
-            if state_ext:
-                sess = self.check_session(sess, lock) # refresh after potential replay
-                state_ext_str = state_ext.to_json_string()
-                if state_ext_str in sess.mapping_state:
-                    state_ext = sess.mapping_state[state_ext_str]
-
-            yield sess, worker, lock, params
+            yield session, worker, lock, params
 
         except PetanqueError as e:
             # if petanque error is related to a timeout, then send kill signal to the underlying pet server.
@@ -215,30 +275,83 @@ class SessionManager:
                     lock.release()
                 except redis.exceptions.LockError:
                     pass
+    
+    @singledispatchmethod
+    def _after_pet_call(
+        self,
+        params: Params,
+        *,
+        session: Session,
+        route: RouteName,
+        res: BaseResponse,
+        gen: int,
+        timeout: Optional[float],
+    ) -> None:
+        # default: nothing to record
+        return
 
+    @_after_pet_call.register
+    def _(
+        self,
+        params: SessionParams,
+        *,
+        session: Session,
+        route: RouteName,
+        res: BaseResponse,
+        gen: int,
+        timeout: Optional[float],
+    ) -> None:
+        sres = require_session_response(res, params=params, route=route)
+        state_ext = StateExtended.from_state(sres.extract_state(), gen)
+
+        parent_state, tac = params.extract_parent()
+        parent_ext = (
+            parent_state
+            if isinstance(parent_state, StateExtended)
+            else StateExtended.from_state(parent_state, gen)
+        )
+
+        TacticsTree(state_ext.key, tac, parent_ext)
+
+    @_after_pet_call.register
+    def _(
+        self,
+        params: PrimitiveParams,
+        *,
+        session: Session,
+        route: RouteName,
+        res: BaseResponse,
+        gen: int,
+        timeout: Optional[float],
+    ) -> None:
+        sres = require_session_response(res, params=params, route=route)
+        state_ext = StateExtended.from_state(sres.extract_state(), gen)
+
+        query_args = QueryKwargs(route, params, timeout=timeout)
+        TacticsParent(state_ext.key, query_args)
+    
     def _pet_call(
         self,
         session_id: str,
-        route: str,
+        route_name: RouteName,
         params: Params,
-        res_cls: type[Responses],
-        is_session: bool,
-        parent: str='',
-        cmd: str='',
-        timeout: Optional[float]=None
+        timeout: Optional[float] = None,
     ) -> Any:
-        with self._pet_ctx(
-            session_id,
-            params=params
-        ) as (sess, worker, lock, updated_params):
-            lock.extend(timeout, replace_ttl=True)
-            try:
-                parent = getattr(params, parent, None)
-                cmd = getattr(params, cmd, '')
-                res_raw = worker.query(updated_params, route, timeout=timeout)
-                res = res_cls.extract_response(res_raw)
-                if is_session:
-                    sess.tactics.append(())
-                return res
-            finally:
-                lock.release()
+        with self._pet_ctx(session_id, params=params) as (session, worker, lock, updated_params):
+            ttl = (timeout or self.timeout_ok) + self.timeout_eps
+            lock.extend(ttl, replace_ttl=True)
+
+            query_res = worker.query(updated_params, route_name, timeout=timeout)
+            res = query_res.extract_response()
+
+            gen = self.get_generation(session.pet_idx)
+            self._after_pet_call(
+                updated_params,
+                session=session,
+                route=route_name,
+                res=res,
+                gen=gen,
+                timeout=timeout,
+            )
+
+            return res
