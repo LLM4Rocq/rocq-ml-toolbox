@@ -9,14 +9,11 @@ class PetStatus(StrEnum):
 def session_key(session_id: str) -> str:
     return f"session:{session_id}"
 
-def cache_state_at_pos_key(id: str) -> str:
-    return f"cache_state_at_pos:{id}"
+def mapping_state_key(session_id: str) -> str:
+    return f"mapping_state:{session_id}"
 
-def cache_state_start_key(id: str) -> str:
-    return f"cache_state_start:{id}"
-
-def cache_root_state_key(id: str) -> str:
-    return f"cache_root_state:{id}"
+def tactics_tree_key(session_id: str) -> str:
+    return f"tactics_tree_key:{session_id}"
 
 def pet_status_key(pet_idx: int) -> str:
     return f"pet_status:{pet_idx}"
@@ -30,9 +27,6 @@ def pet_lock_key(pet_idx: int) -> str:
 def monitor_epoch_key(pet_idx: int) -> str:
     return f"pet_monitor_epoch:{pet_idx}"
 
-def session_lock_key() -> str:
-    return "session_lock"
-
 def session_assigned_idx_key() -> str:
     return "session_assigned_idx_key"
 
@@ -41,9 +35,8 @@ def archived_sessions_key() -> str:
 
 ALL_KEYS_STAR = [
     session_key('*'),
-    cache_state_at_pos_key('*'),
-    cache_state_start_key('*'),
-    cache_root_state_key('*'),
+    mapping_state_key('*'),
+    tactics_tree_key('*'),
     pet_status_key('*'),
     generation_key('*'),
     pet_lock_key('*'),
