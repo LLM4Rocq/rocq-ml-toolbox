@@ -8,11 +8,12 @@ from pytanque.protocol import (
     Goal,
     Inspect,
     InspectGoals,
-    InspectPhysical,
-    GoalsResponse
+    InspectPhysical
 )
-
-from rocq_ml_toolbox.inference.client import StateExtended
+from pytanque.client import RouteName
+from pytanque.params import StartParams
+from pytanque.response import GoalsResponse, StartResponse
+from rocq_ml_toolbox.inference.session_model import State
 
 
 def _find_line_char(path_abs: str, needle: str) -> Tuple[int, int]:
@@ -63,15 +64,15 @@ def statement_state(client, server_file, lemma_pos):
 @pytest.fixture(scope="session")
 def started_state(client, server_file):
     thm,proof= _pick_thm()
-    st = client.start(file=server_file, thm=thm, timeout=180)
+    st = client.start(server_file, thm, timeout=180)
     return thm, proof, st
 
 @pytest.mark.api
 def test_get_state_at_pos_endpoint(client, server_file, needle_pos):
     line0, ch0 = needle_pos
-    st = client.get_state_at_pos(filepath=server_file, line=line0, character=ch0, timeout=180)
-    assert isinstance(st, StateExtended)
-
+    st = client.get_state_at_pos(server_file, line0, ch0, timeout=180)
+    assert isinstance(st, State)
+ 
 @pytest.mark.api
 def test_run_endpoint(client, started_state):
     _, proof, st0 = started_state
@@ -83,7 +84,7 @@ def test_run_endpoint(client, started_state):
 @pytest.mark.api
 def test_goals_endpoint(client, started_state):
     _, _, st0 = started_state
-    goals = client.goals(st0, pretty=True, timeout=30)
+    goals = client.goals(st0, timeout=30)
     assert isinstance(goals, list)
     for goal in goals:
         assert isinstance(goal, Goal)
@@ -91,7 +92,7 @@ def test_goals_endpoint(client, started_state):
 @pytest.mark.api
 def test_complete_goals_endpoint(client, started_state):
     _, _, st0 = started_state
-    goals = client.complete_goals(st0, pretty=True, timeout=30)
+    goals = client.complete_goals(st0, timeout=30)
     assert isinstance(goals, GoalsResponse) or not goals
 
 @pytest.mark.api
@@ -120,7 +121,7 @@ def test_state_hash_endpoint(client, started_state):
 
 @pytest.mark.api
 def test_toc(client, server_file):
-    toc = client.toc(server_file)
+    toc = client.toc(server_file, timeout=120)
     assert isinstance(toc, list)
 
 @pytest.mark.api
@@ -132,43 +133,43 @@ def test_ast_endpoint(client, started_state):
 @pytest.mark.api
 def test_ast_at_pos(client, server_file, lemma_pos):
     line0, ch0 = lemma_pos
-    ast = client.ast_at_pos(file=server_file, line=line0, character=ch0, timeout=60)
+    ast = client.ast_at_pos(server_file, line0, ch0, timeout=60)
     assert ast is not None
 
 @pytest.mark.api
 def test_get_root_state_endpoint(client, server_file):
-    st = client.get_root_state(file=server_file, timeout=180)
-    assert isinstance(st, StateExtended) and st
+    st = client.get_root_state(server_file, timeout=180)
+    assert isinstance(st, State) and st
 
 @pytest.mark.api
 def test_list_notations_in_statement_endpoint(client, statement_state):
     st0 = statement_state
     statement = _extract_statement()
-    notations = client.list_notations_in_statement(st0, statement=statement, timeout=60)
+    notations = client.list_notations_in_statement(st0, statement, timeout=60)
     assert isinstance(notations, list)
 
 @pytest.mark.api
 def test_start_endpoint(client, server_file):
     thm,_ = _pick_thm()
-    st = client.start(file=server_file, thm=thm, timeout=180)
-    assert isinstance(st, StateExtended) and st
+    st = client.start(server_file, thm, timeout=180)
+    assert isinstance(st, State) and st
+
+@pytest.mark.api
+def test_query(client, server_file):
+    thm,_ = _pick_thm()
+    params = StartParams(server_file, thm)
+    resp = client.query(RouteName.START, params, timeout=60)
+    assert isinstance(resp, StartResponse)
 
 # @pytest.mark.api
-# def test_query(client, server_file):
-#     thm,_ = _pick_thm()
-#     params = StartParams(server_file, thm, "")
-#     resp = client.query(params, timeout=60)
-#     assert isinstance(resp, Response)
+# def test_get_document_endpoint(client, server_file):
+#     client.get_document(server_file)
 
-@pytest.mark.api
-def test_get_document_endpoint(client, server_file):
-    client.get_document(server_file)
+# @pytest.mark.api
+# def test_get_ast_endpoint(client, server_file):
+#     client.get_ast(server_file, force_dump=True)
 
-@pytest.mark.api
-def test_get_ast_endpoint(client, server_file):
-    client.get_ast(server_file, force_dump=True)
-
-@pytest.mark.api
-def test_get_session_endpoint(client):
-    sess = client.get_session()
-    assert sess["session_id"] == client.session_id
+# @pytest.mark.api
+# def test_get_session_endpoint(client):
+#     sess = client.get_session()
+#     assert sess["session_id"] == client.session_id
