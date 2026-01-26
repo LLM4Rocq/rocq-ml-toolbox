@@ -39,6 +39,14 @@ def require_session_response(res: BaseResponse, *, params: Params, route_name: R
         )
     return cast(SessionResponse, res)
 
+def normalize_payload(obj):
+    """
+    A bit hacky, at some point every response will be a full dataclass.
+    """
+    if hasattr(obj, "to_json") and callable(obj.to_json):
+        return obj.to_json()
+    return obj
+
 class SessionManagerError(Exception):
     def __init__(self, message, require_restart=False):
         self.message = message
@@ -300,8 +308,7 @@ class SessionManager:
         gen: int,
         timeout: Optional[float],
     ) -> None:
-        # default: nothing to record
-        return res.extract_response()
+        return res
 
     @_after_pet_call.register
     def _(
@@ -364,7 +371,12 @@ class SessionManager:
             logging.info(f"[{session.id}] {route_name}: {params}")
             ttl = (timeout or self.timeout_ok) + self.timeout_eps
             lock.extend(ttl, replace_ttl=True)
+            logging.info(f"[{session.id}] {updated_params}")
             query_res = worker.query(route_name, updated_params, timeout=timeout)
+            logging.info(f"[{session.id}] {query_res}")
+            if query_res is None:
+                return Response(request_id, {})
+            
             gen = self.get_generation(session.pet_idx)
             res_update = self._after_pet_call(
                 params,
@@ -376,4 +388,4 @@ class SessionManager:
                 timeout=timeout,
             )
 
-            return Response(request_id, res_update.to_json())
+            return Response(request_id, normalize_payload(res_update))
