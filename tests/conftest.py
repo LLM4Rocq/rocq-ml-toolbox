@@ -10,7 +10,9 @@ from typing import Tuple, List
 import pytest
 import requests
 
-from rocq_ml_toolbox.inference.client import PetClient
+from pytanque import Pytanque as PetClient
+from pytanque.client import PytanqueMode
+# from rocq_ml_toolbox.inference.client import PetClient
 from rocq_ml_toolbox.parser.rocq_parser import RocqParser
 
 def pytest_addoption(parser):
@@ -64,11 +66,11 @@ def _wait_until_ready(url: str, proc: subprocess.Popen | None, timeout_s: float 
 
     while time.time() < deadline:
         if proc is not None and proc.poll() is not None:
-            raise RuntimeError("Gunicorn exited early while starting.")
+            raise RuntimeError("Server exited early while starting.")
 
         try:
             r = requests.get(url + "/health", timeout=0.5)
-            if r.status_code == 200 and r.text.strip() == "OK":
+            if r.status_code == 200:
                 return
         except Exception as e:
             last_err = e
@@ -100,8 +102,8 @@ def _stop_redis(container_id: str):
         text=True,
     )
 
-def _start_gunicorn(bind_host: str, bind_port: int) -> subprocess.Popen:
-    kill_all_proc('gunicorn')
+def _start_uvicorn(bind_host: str, bind_port: int) -> subprocess.Popen:
+    kill_all_proc('uvicorn')
     kill_all_proc('pet-server')
     os.environ["NUM_PET_SERVER"] = str(4)
     os.environ["PET_SERVER_START_PORT"] = str(8765)
@@ -109,16 +111,15 @@ def _start_gunicorn(bind_host: str, bind_port: int) -> subprocess.Popen:
     os.environ["REDIS_URL"] = "redis://localhost:6379/0"
 
     cmd = [
-        "gunicorn",
-        "-w", "9",
-        "-b", f"{bind_host}:{bind_port}",
+        "uvicorn",
         "src.rocq_ml_toolbox.inference.server:app",
-        "-t", "600",
-        "-c", "python:src.rocq_ml_toolbox.inference.gunicorn_config",
-        "--error-logfile", "gunicorn-error.log",
-        "--access-logfile", "gunicorn-access.log",
-        "--capture-output",
+        "--log-config", "src/rocq_ml_toolbox/inference/logging_config.yaml",
+        "--host", bind_host,
+        "--port", str(bind_port),
+        "--workers", "9",
+        "--timeout-worker-healthcheck", "600"
     ]
+    print(" ".join(cmd))
     env = os.environ.copy()
     return subprocess.Popen(
         cmd,
@@ -142,19 +143,19 @@ def port() -> int:
 @pytest.fixture(scope="session")
 def server(host, port):
     # container_id = _start_redis()
-    proc_gunicorn = _start_gunicorn(host, port)
+    proc_uvicorn = _start_uvicorn(host, port)
     url = f"http://{host}:{port}"
     try:
-        _wait_until_ready(url, proc=proc_gunicorn, timeout_s=30.0)
+        _wait_until_ready(url, proc=proc_uvicorn, timeout_s=30.0)
         yield "OK"
     finally:
         try:
-            proc_gunicorn.terminate()
-            proc_gunicorn.wait(timeout=2)
+            proc_uvicorn.terminate()
+            proc_uvicorn.wait(timeout=2)
         except Exception:
             try:
-                proc_gunicorn.kill()
-                proc_gunicorn.wait(timeout=2)
+                proc_uvicorn.kill()
+                proc_uvicorn.wait(timeout=2)
             except Exception:
                 pass
         
@@ -162,7 +163,7 @@ def server(host, port):
 
 @pytest.fixture(scope="session")
 def client(host, port, server) -> PetClient:
-    client = PetClient(host, port)
+    client = PetClient(host, port, mode=PytanqueMode.HTTP)
     client.connect()
     return client
 
