@@ -12,7 +12,8 @@ import pytest
 from filelock import FileLock
 
 from rocq_ml_toolbox.parser.rocq_parser import Source, Theorem, VernacElement, RocqParser
-from rocq_ml_toolbox.inference.client import PetClient
+from pytanque import Pytanque as PetClient
+from pytanque.client import PytanqueMode
 from rocq_ml_toolbox.inference.redis_keys import pet_status_key, PetStatus
 from rocq_ml_toolbox.parser.utils.position import offset_to_pos
 
@@ -24,7 +25,7 @@ def kill_all_proc(proc_name: str):
     time.sleep(1)
 
 def try_proof_kill(entry, host, port) -> bool:
-    client = PetClient(host, port)
+    client = PetClient(host, port, mode=PytanqueMode.HTTP)
     client.connect()
     state = client.get_state_at_pos(entry['filepath'], entry['line'], entry['character'])
     for step in entry['steps']:
