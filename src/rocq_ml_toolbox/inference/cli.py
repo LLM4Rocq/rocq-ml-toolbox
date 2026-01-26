@@ -14,14 +14,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("-w", "--workers", type=int, default=9)
     p.add_argument("-t", "--timeout", type=int, default=600)
     p.add_argument("-d", "--detached", action="store_true", help="Run gunicorn in the background (daemon mode).")
-    p.add_argument("--pidfile", default="/tmp/rocq-ml-server.pid", help="PID file (with --detached).")
+    p.add_argument("--pidfile", default="rocq-ml-server.pid", help="PID file (with --detached).")
     p.add_argument("--num-pet-server", type=int, default=4)
     p.add_argument("--pet-server-start-port", type=int, default=8765)
     p.add_argument("--max-ram-per-pet", type=int, default=3072, help="Maximum allowed ram usage in MB per pet-server process.")
     p.add_argument("--redis-url", type=str, default="redis://localhost:6379/0")
 
-    p.add_argument("--errorlog", default="/tmp/gunicorn-error.log")
-    p.add_argument("--accesslog", default="/tmp/gunicorn-access.log")
+    p.add_argument("--errorlog", default="gunicorn-error.log")
+    p.add_argument("--accesslog", default="gunicorn-access.log")
 
     p.add_argument("--app", default=DEFAULT_APP)
     p.add_argument("--config", default=DEFAULT_CONFIG)
