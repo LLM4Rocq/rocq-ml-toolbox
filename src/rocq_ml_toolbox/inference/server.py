@@ -1,12 +1,22 @@
 import os
 
-from pytanque.protocol import Request
-from .rpc_registry import dispatch_rpc
-
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request as FastAPIRequest, HTTPException
+
+from pydantic import BaseModel
+from typing import Optional, Any
+from pytanque.client import RouteName
+from pytanque.routes import PETANQUE_ROUTES
 from .sessions import SessionManager
-from .rpc_registry import build_registry, dispatch_rpc
+
+
+class JsonRpcBody(BaseModel):
+    jsonrpc: str = "2.0"
+    id: int
+    session_id: str
+    route_name: RouteName
+    params: dict[str, Any]
+    timeout: Optional[float]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -19,8 +29,8 @@ async def lifespan(app: FastAPI):
         pet_server_start_port=PET_SERVER_START_PORT,
         num_pet_server=NUM_PET_SERVER
     )
-    registry = build_registry(sm)
-    app.state.registry = registry
+    # registry = build_registry(sm)
+    app.state.sm = sm
     yield
 
     # cleanup hook?
@@ -28,8 +38,27 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+@app.get("/login")
+def login(request: FastAPIRequest):
+    """
+    Return a session object with assigned pet-server index and unique session ID.
+    """
+    session_manager: SessionManager = request.app.state.sm
+    session_id = session_manager.create_session()
+    return {"session_id": session_id}
+
 @app.post("/rpc")
-def rpc_endpoint(request: Request, body: bytes, x_session_id: str | None = None):
-    registry = request.app.state.registry
-    result = dispatch_rpc(registry)
-    return result
+def rpc_endpoint(body: JsonRpcBody, request: FastAPIRequest):
+    session_manager: SessionManager = request.app.state.sm
+    params_cls = PETANQUE_ROUTES.get(body.route_name).params_cls
+    params_obj = params_cls.from_json(body.params)
+
+    result = session_manager._pet_call(
+        request_id=body.id,
+        session_id=body.session_id,
+        route_name=body.route_name,
+        params=params_obj,
+        timeout=body.timeout,
+    )
+    # result = dispatch_rpc(registry)
+    return result.to_json()
