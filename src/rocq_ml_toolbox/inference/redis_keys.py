@@ -41,7 +41,6 @@ ALL_KEYS_STAR = [
     generation_key('*'),
     pet_lock_key('*'),
     monitor_epoch_key('*'),
-    session_lock_key(),
     session_assigned_idx_key(),
     archived_sessions_key()
 ]
