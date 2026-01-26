@@ -3,40 +3,12 @@ from dataclasses import dataclass, field, asdict
 import json
 from typing import List, Union, Any, Dict, Optional
 
-from pytanque.routes import RouteName
+from pytanque.routes import RouteName, PETANQUE_ROUTES
 from pytanque.client import Params, State
 from redis import Redis
 
-@dataclass
-class StateExtended(State):
-    generation: int
-
-    @property
-    def key(self) -> str:
-        return f"{self.generation}:{self.st}"
-    
-    @classmethod
-    def from_state(cls, state:State, generation:int):
-        return cls(
-            **asdict(state),
-            generation=generation
-        )
-
-    def to_state(self) -> State:
-        State.from_json(self.to_json())
-
-    @classmethod
-    def from_json(
-        cls,
-        x: Any
-    ):
-        state = State.from_json(x)
-        return StateExtended.from_state(state, x['generation'])
-
-    def to_json(self):
-        state_raw = super().to_json()
-        state_raw['generation'] = self.generation
-        return state_raw
+def state_to_state_key(state: State) -> str:
+    return f"{state.generation}:{state.st}"
     
 class RedisSerializable:
     redis_key: str
@@ -61,14 +33,16 @@ class RedisSerializable:
 class QueryKwargs:
     route_name: RouteName
     params: Params
-    timeout: float
+    timeout: Optional[float]
 
     @classmethod
     def from_json(cls, data: dict) -> "QueryKwargs":
+        route_name = RouteName(data["route_name"])
+        params_cls = PETANQUE_ROUTES[route_name].params_cls
         return cls(
-            route_name=RouteName(data["route_name"]),
-            params=Params.from_json(data["params"]),
-            timeout=float(data["timeout"]),
+            route_name=route_name,
+            params=params_cls.from_json(data["params"]),
+            timeout=float(data["timeout"]) if data['timeout'] else None,
         )
 
     def to_json(self) -> dict:
@@ -79,16 +53,30 @@ class QueryKwargs:
         }
 
 @dataclass
-class TacticsParent(RedisSerializable):
+class TacticsTree(RedisSerializable):
     """
     Parent node, associated to a set of params to generate it.
     """
     state_key: str
     query_kwargs: QueryKwargs
     children: List[TacticsTree]=field(default_factory=list)
+    parent: Optional[TacticsTree]=None
     redis_key = "tactics_tree"
 
-    def find_node(self, state_key: str) -> TacticsParent | TacticsTree:
+    @classmethod
+    def from_state(
+        cls,
+        state,
+        query_kwargs: QueryKwargs
+    ) -> TacticsTree:
+        return cls(state_key=state_to_state_key(state), query_kwargs=query_kwargs)
+
+    def add_child(self, child: TacticsTree) -> None:
+        child.parent = self
+        self.children.append(child)
+
+    def find_node(self, state: State) -> TacticsTree:
+        state_key = state_to_state_key(state)
         if self.state_key == state_key:
             return self
         stack = list(self.children)
@@ -99,56 +87,6 @@ class TacticsParent(RedisSerializable):
             stack.extend(node.children)
         raise Exception("State not found")
 
-    def find_path(self, state: StateExtended) -> list[TacticsTree]:
-        state_key = state.key
-        node = self.find_node(state_key)
-        return node.trace_ancestors(node)
-
-    def to_json(self) -> Any:
-        return {
-            "state_key": self.state_key,
-            "query_kwargs": self.query_kwargs.to_json(),
-            "children": [child.to_json() for child in self.children],
-        }
-    
-    @classmethod
-    def from_json(cls, data: dict) -> TacticsParent:
-        parent = cls(
-            state_key=data.get("state_key"),
-            query_kwargs=QueryKwargs.from_json(data["query_kwargs"]),
-            children=[]
-        )
-
-        for child_data in data.get("children", []):
-            child = TacticsTree.from_json(child_data, parent=parent)
-            parent.children.append(child)
-
-        return parent
-
-@dataclass
-class TacticsTree:
-    """
-    Basic Tree structure to keep tracks of tactics.
-    Beware of infinite recursion.
-    """
-    state_key: str
-    tactic: str
-    parent: Union[TacticsParent, TacticsTree]
-    children: List[TacticsTree]=field(default_factory=list)
-
-    def add_child(self, child: TacticsTree) -> None:
-        child.parent = self
-        self.children.append(child)
-
-    def create_child(self, state_key: str, tactic: str) -> TacticsTree:
-        child = TacticsTree(
-            state_key=state_key,
-            tactic=tactic,
-            parent=self
-        )
-        self.children.append(child)
-        return child
-    
     def trace_ancestors(self) -> list[TacticsTree]:
         path = []
         node = self
@@ -156,42 +94,42 @@ class TacticsTree:
             path.append(node)
             node = node.parent
         return list(reversed(path))
-    
-    def to_json(self):
+
+    def find_path(self, state: State) -> list[TacticsTree]:
+        node = self.find_node(state)
+        return node.trace_ancestors()
+
+    def to_json(self) -> Any:
         return {
             "state_key": self.state_key,
-            "tactic": self.tactic,
-            "children": [child.to_dict() for child in self.children]
+            "query_kwargs": self.query_kwargs.to_json(),
+            "children": [child.to_json() for child in self.children]
         }
     
     @classmethod
-    def from_json(
-        cls,
-        data: dict,
-        parent: TacticsParent | TacticsTree | None = None
-    ) -> TacticsTree:
-        node = cls(
-            state_key=data["state_key"],
-            tactic=data["tactic"],
-            parent=parent,
+    def from_json(cls, data: dict) -> TacticsTree:
+        parent = cls(
+            state_key=data.get("state_key"),
+            query_kwargs=QueryKwargs.from_json(data["query_kwargs"]),
             children=[]
         )
 
         for child_data in data.get("children", []):
-            child = cls.from_json(child_data, parent=node)
-            node.children.append(child)
+            child = TacticsTree.from_json(child_data)
+            child.parent = parent
+            parent.children.append(child)
 
-        return node
+        return parent
 
 @dataclass
 class MappingState(RedisSerializable):
-    mapping: Dict[str, StateExtended]
+    mapping: Dict[str, State]=field(default_factory=dict)
     redis_key = "mapping_state"
 
     @classmethod
     def from_json(cls, x:dict) -> MappingState:
         return cls({
-            k:StateExtended.from_json(v) for k,v in x.items()
+            k:State.from_json(v) for k,v in x['mapping'].items()
         })
     
     def to_json(self) -> Any:
@@ -199,24 +137,23 @@ class MappingState(RedisSerializable):
             "mapping": {k: v.to_json() for k,v in self.mapping.items()}
         }
     
-    def _key(self, state_or_key: Union[StateExtended, str]) -> str:
-        return state_or_key if isinstance(state_or_key, str) else state_or_key.key
+    def _key(self, state_or_key: Union[State, str]) -> str:
+        return state_or_key if isinstance(state_or_key, str) else state_to_state_key(state_or_key)
 
-    def __getitem__(self, state_or_key: Union[StateExtended, str]) -> StateExtended:
+    def __getitem__(self, state_or_key: Union[State, str]) -> State:
         state_key = self._key(state_or_key)
         return self.mapping[state_key]
     
-    def __contains__(self, state_or_key: Union[StateExtended, str]):
+    def __contains__(self, state_or_key: Union[State, str]):
         state_key = self._key(state_or_key)
         return state_key in self.mapping
 
-    def get(self, state_or_key: Union[StateExtended, str], default: Optional[StateExtended] = None):
+    def get(self, state_or_key: Union[State, str], default: Optional[State] = None):
         state_key = self._key(state_or_key)
         return self.mapping.get(state_key, default)
 
-    def add(self, state: StateExtended):
-        state_key = state.key
-        self.mapping[state_key] = state
+    def add(self, old_state_key: str, new_state: State):
+        self.mapping[old_state_key] = new_state
 
 @dataclass
 class Session:
