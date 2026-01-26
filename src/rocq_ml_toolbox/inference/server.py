@@ -2,6 +2,7 @@ import os
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request as FastAPIRequest, HTTPException
+from fastapi.responses import PlainTextResponse
 
 from pydantic import BaseModel
 from typing import Optional, Any
@@ -29,7 +30,6 @@ async def lifespan(app: FastAPI):
         pet_server_start_port=PET_SERVER_START_PORT,
         num_pet_server=NUM_PET_SERVER
     )
-    # registry = build_registry(sm)
     app.state.sm = sm
     yield
 
@@ -46,6 +46,13 @@ def login(request: FastAPIRequest):
     session_manager: SessionManager = request.app.state.sm
     session_id = session_manager.create_session()
     return {"session_id": session_id}
+
+@app.get("/health")
+def health():
+    """
+    Check health status.
+    """
+    return {"status": "ok"}
 
 @app.post("/rpc")
 def rpc_endpoint(body: JsonRpcBody, request: FastAPIRequest):
