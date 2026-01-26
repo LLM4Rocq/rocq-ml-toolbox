@@ -4,6 +4,7 @@ from typing import List, Optional, Dict, Tuple, Any, Iterator, cast
 from contextlib import contextmanager
 from functools import singledispatchmethod
 from dataclasses import fields
+import logging
 import json
 import uuid
 
@@ -28,6 +29,8 @@ from .redis_keys import (
     session_assigned_idx_key
 )
 from .session_model import TacticsTree, MappingState, Session, State, QueryKwargs
+
+logger = logging.getLogger(__name__)
 
 def require_session_response(res: BaseResponse, *, params: Params, route_name: RouteName, **kwargs) -> SessionResponse:
     if not isinstance(res, SessionResponse):
@@ -206,10 +209,9 @@ class SessionManager:
         if tactics_tree:
             lock.extend(timeout_get_state+self.timeout_eps, replace_ttl=True)
             replay_session = tactics_tree.find_path(state)
-            print(f"START REPLAY for {state}")
+            logging.info(f"[{session.id}] State inconsistency, replay mechanism ON.")
             for node in replay_session:
-                print("REPLAY")
-                print(node.query_kwargs.params)
+                logging.info(f"[{session.id}] REPLAY: {node.query_kwargs.params}")
                 state = mapping_state.get(node.state_key, None)
                     
                 # if state is outdated or None then regenerate it
@@ -221,7 +223,6 @@ class SessionManager:
                     state = query_res.extract_response()
                     state.generation = current_generation
                     mapping_state.add(node.state_key, state)
-            print("END REPLAY")
             mapping_state.to_redis(session,self.redis_client)
         else:
             raise SessionManagerError(f"Session {session.id} doesn't have any TacticsParent")
@@ -266,16 +267,19 @@ class SessionManager:
 
         except PetanqueError as e:
             # if petanque error is related to a timeout, then send kill signal to the underlying pet server.
-            # if e.code == -33_000:
-            #     self.send_kill_signal(pet_idx)
+            if e.code == -33_000:
+                self.send_kill_signal(pet_idx)
+                logging.warning(f"[{session.id}] Kill signal send to {pet_idx} after {params}, cause: {e}")
             raise e
         except SessionManagerError as e:
-            # if e.require_restart:
-            #     self.send_kill_signal(pet_idx)
+            if e.require_restart:
+                self.send_kill_signal(pet_idx)
+                logging.warning(f"[{session.id}] Kill signal send to {pet_idx} after {params}, cause: {e}")
             raise e
         except Exception as e:
             # if unknown issue then send kill signal to the underlying pet server.
-            # self.send_kill_signal(pet_idx)
+            self.send_kill_signal(pet_idx)
+            logging.warning(f"[{session.id}] Kill signal send to {pet_idx} after {params}, cause: {e}")
             raise e
         finally:
             if lock is not None:
@@ -311,7 +315,6 @@ class SessionManager:
         gen: int,
         timeout: Optional[float],
     ) -> None:
-        print(f"Session Params {params}")
         sres = require_session_response(res, params=params, route_name=route_name)
         state = sres.extract_response()
         state.generation = gen
@@ -326,7 +329,6 @@ class SessionManager:
         child = TacticsTree.from_state(state, query_args)
         parent_node.add_child(child)
         tactics_tree.to_redis(session, self.redis_client)
-        print(f"End call")
         return state
 
     @_after_pet_call.register
@@ -341,14 +343,12 @@ class SessionManager:
         gen: int,
         timeout: Optional[float],
     ) -> None:
-        print(f"Primitive Params {params}")
         sres = require_session_response(res, params=updated_params, route_name=route_name)
         state = sres.extract_response()
         state.generation = gen
         query_args = QueryKwargs(route_name, params, timeout=timeout)
         tactics_tree = TacticsTree.from_state(state, query_args)
         tactics_tree.to_redis(session, self.redis_client)
-        print(f"End call")
         return state
     
     def _pet_call(
@@ -360,9 +360,8 @@ class SessionManager:
         timeout: Optional[float] = None,
     ) -> Any:
         # TODO: set_workspace is not manage right now
-        print("NEW REQUEST")
-        print(params)
         with self._pet_ctx(session_id, params=params) as (session, worker, lock, updated_params):
+            logging.info(f"[{session.id}] {route_name}: {params}")
             ttl = (timeout or self.timeout_ok) + self.timeout_eps
             lock.extend(ttl, replace_ttl=True)
             query_res = worker.query(route_name, updated_params, timeout=timeout)
