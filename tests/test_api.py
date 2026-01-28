@@ -165,9 +165,9 @@ def test_query(client, server_file):
 # def test_get_document_endpoint(client, server_file):
 #     client.get_document(server_file)
 
-# @pytest.mark.api
-# def test_get_ast_endpoint(client, server_file):
-#     client.get_ast(server_file, force_dump=True)
+@pytest.mark.api
+def test_get_ast_endpoint(client, server_file):
+    client.get_ast(server_file, force_dump=True)
 
 # @pytest.mark.api
 # def test_get_session_endpoint(client):
