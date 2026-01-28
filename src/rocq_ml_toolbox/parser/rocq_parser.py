@@ -11,14 +11,14 @@ from .utils.position import pos_to_offset, offset_to_pos
 
 from .ast.model import VernacKind, VernacElement
 from .parser import Source, Theorem, ParserError, Step
-from ..inference.client import PetClient, ClientError
 
-
+from pytanque import PetanqueError
+from ..inference.client import PytanqueExtended
 
 class RocqParser:
     """Interact with petanque to collect proof structure and metadata."""
 
-    def __init__(self, client: PetClient):
+    def __init__(self, client: PytanqueExtended):
         """Create a parser bound to a client."""
         super().__init__()
         self.client = client
@@ -32,12 +32,12 @@ class RocqParser:
     def _extract_blocks(content: str):
         return re.split(r'(?<=\.\s)', content)
 
-    def extract_element(self, state: State, element: str, timeout: int=30, retry=1, is_notation=False) -> Tuple[Optional[VernacElement], bool]:
+    def extract_element(self, state: State, element: str, timeout: int=30, is_notation=False) -> Tuple[Optional[VernacElement], bool]:
         try:
             if is_notation:
-                substate = self.client.run(state, f'About "{element}".', timeout=timeout, retry=retry)
+                substate = self.client.run(state, f'About "{element}".', timeout=timeout)
             else:
-                substate = self.client.run(state, f'About {element}.', timeout=timeout, retry=retry)
+                substate = self.client.run(state, f'About {element}.', timeout=timeout)
             if substate.feedback:
                 for feedback_tuple in substate.feedback:
                     feedback = feedback_tuple[1]
@@ -45,10 +45,10 @@ class RocqParser:
                     if element:
                         return element, is_local
                 return None, False
-        except ClientError:
+        except PetanqueError:
             return None, False
 
-    def extract_dependencies(self, state: State, tactic: str, timeout: int=30, retry=1) -> List[VernacElement]:
+    def extract_dependencies(self, state: State, tactic: str, timeout: int=30) -> List[VernacElement]:
         ast = self.client.ast(state, tactic)
         if ast:
             constants = list_dependencies(ast)
@@ -56,17 +56,17 @@ class RocqParser:
             constants = []
         dependencies = []
         for constant in constants:
-            element, _ = self.extract_element(state, constant, timeout=timeout, retry=retry)
+            element, _ = self.extract_element(state, constant, timeout=timeout)
             if element:
                 dependencies.append(element)
         return dependencies
 
-    def _extract_loadpath(self, timeout: int=30, retry=1) -> Dict[str, str]:
+    def _extract_loadpath(self, timeout: int=30) -> Dict[str, str]:
         try:
             state = self.client.get_root_state('/tmp/init.v')
-        except ClientError as e:
+        except PetanqueError as e:
             raise ParserError('Missing /tmp/init.v file.')
-        result = self.client.run(state, 'Print LoadPath.', timeout=timeout, retry=retry)
+        result = self.client.run(state, 'Print LoadPath.', timeout=timeout)
         return parse_loadpath(result.feedback[0][1])
 
     def extract_toc(self, source: Source) -> List[VernacElement]:
@@ -141,8 +141,8 @@ class RocqParser:
                     print(f"Too many errors, drop the file {source.path}.")
                     break
     
-    def extract_proofs_wo_check(self, source: Source, retry=1) -> List[Tuple[VernacElement, List[str]]]:
-        ast = self.client.get_ast(source.path, retry=retry)
+    def extract_proofs_wo_check(self, source: Source) -> List[Tuple[VernacElement, List[str]]]:
+        ast = self.client.get_ast(source.path)
         proof_open = False
         theorem_element = None
         steps = []
