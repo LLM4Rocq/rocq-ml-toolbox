@@ -10,9 +10,8 @@ from typing import Tuple, List
 import pytest
 import requests
 
-from pytanque import Pytanque as PetClient
+from src.rocq_ml_toolbox.inference.client import PytanqueExtended
 from pytanque.client import PytanqueMode
-# from rocq_ml_toolbox.inference.client import PetClient
 from rocq_ml_toolbox.parser.rocq_parser import RocqParser
 
 def pytest_addoption(parser):
@@ -20,14 +19,14 @@ def pytest_addoption(parser):
         "--stress-workers",
         action="store",
         type=int,
-        default=8,
+        default=4,
         help="Number of client worker processes used inside the stress test."
     )
     parser.addoption(
         "--stress-n",
         action="store",
         type=int,
-        default=10,
+        default=100,
         help="Number of dataset entries to run in stress test (balanced success/non-success)."
     )
     parser.addoption(
@@ -35,6 +34,26 @@ def pytest_addoption(parser):
         type=str,
         default="/home/theo/.opam/mc_dev/lib/coq/user-contrib/Stdlib/",
         help="Location of the Stdlib in the current opam env."
+    )
+    parser.addoption(
+        "--num-pet-server",
+        type=int,
+        default=4
+    )
+    parser.addoption(
+        "--pet-server-start-port",
+        type=int,
+        default=8765
+    )
+    parser.addoption(
+        "--max-ram-per-pet",
+        type=int,
+        default=3096
+    )
+    parser.addoption(
+        "--redis-url",
+        type=str,
+        default="redis://localhost:6379/0"
     )
 
 
@@ -47,8 +66,25 @@ def stress_n(pytestconfig) -> int:
     return int(pytestconfig.getoption("--stress-n"))
 
 @pytest.fixture(scope="session")
-def stdlib_path(pytestconfig) -> int:
+def stdlib_path(pytestconfig) -> str:
     return str(pytestconfig.getoption("--stdlib-path"))
+
+@pytest.fixture(scope="session")
+def num_pet_server(pytestconfig) -> int:
+    return int(pytestconfig.getoption("--num-pet-server"))
+
+@pytest.fixture(scope="session")
+def pet_server_start_port(pytestconfig) -> int:
+    return int(pytestconfig.getoption("--pet-server-start-port"))
+
+@pytest.fixture(scope="session")
+def max_ram_per_pet(pytestconfig) -> int:
+    return int(pytestconfig.getoption("--max-ram-per-pet"))
+
+@pytest.fixture(scope="session")
+def redis_url(pytestconfig) -> str:
+    return str(pytestconfig.getoption("--redis-url"))
+
 
 @pytest.fixture(scope="session")
 def stdlib_filepaths(stdlib_path) -> List[str]:
@@ -102,24 +138,19 @@ def _stop_redis(container_id: str):
         text=True,
     )
 
-def _start_uvicorn(bind_host: str, bind_port: int) -> subprocess.Popen:
-    kill_all_proc('uvicorn')
-    kill_all_proc('pet-server')
-    os.environ["NUM_PET_SERVER"] = str(4)
-    os.environ["PET_SERVER_START_PORT"] = str(8765)
-    os.environ["MAX_RAM_PER_PET"] = str(2048)
-    os.environ["REDIS_URL"] = "redis://localhost:6379/0"
+@pytest.fixture(scope="session")
+def _set_env_variable(num_pet_server, pet_server_start_port, max_ram_per_pet, redis_url):
+    os.environ["NUM_PET_SERVER"] = str(num_pet_server)
+    os.environ["PET_SERVER_START_PORT"] = str(pet_server_start_port)
+    os.environ["MAX_RAM_PER_PET"] = str(max_ram_per_pet)
+    os.environ["REDIS_URL"] = redis_url
+    return
 
+def _start_arbiter() -> subprocess.Popen:
     cmd = [
-        "uvicorn",
-        "src.rocq_ml_toolbox.inference.server:app",
-        "--log-config", "src/rocq_ml_toolbox/inference/logging_config.yaml",
-        "--host", bind_host,
-        "--port", str(bind_port),
-        "--workers", "9",
-        "--timeout-worker-healthcheck", "600"
+        "python",
+        "-m", "src.rocq_ml_toolbox.inference.arbiter"
     ]
-    print(" ".join(cmd))
     env = os.environ.copy()
     return subprocess.Popen(
         cmd,
@@ -129,6 +160,39 @@ def _start_uvicorn(bind_host: str, bind_port: int) -> subprocess.Popen:
         preexec_fn=os.setsid,
         text=True,
     )
+def _start_uvicorn(bind_host: str, bind_port: int, workers:int) -> subprocess.Popen:
+    kill_all_proc('uvicorn')
+    kill_all_proc('pet-server')
+
+    cmd = [
+        "uvicorn",
+        "src.rocq_ml_toolbox.inference.server:app",
+        "--log-config", "src/rocq_ml_toolbox/inference/logging_config.yaml",
+        "--host", bind_host,
+        "--port", str(bind_port),
+        "--workers", str(workers),
+        "--timeout-worker-healthcheck", "600"
+    ]
+    env = os.environ.copy()
+    return subprocess.Popen(
+        cmd,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        preexec_fn=os.setsid,
+        text=True,
+    )
+
+def kill_proc(proc: subprocess.Popen):
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except Exception:
+            pass
 
 @pytest.fixture(scope="session")
 def host() -> str:
@@ -141,29 +205,23 @@ def port() -> int:
     return port
 
 @pytest.fixture(scope="session")
-def server(host, port):
+def server(host, port, num_pet_server, _set_env_variable):
     # container_id = _start_redis()
-    proc_uvicorn = _start_uvicorn(host, port)
+    proc_arbiter = _start_arbiter()
+    time.sleep(10)
+    proc_uvicorn = _start_uvicorn(host, port, num_pet_server*2+1)
     url = f"http://{host}:{port}"
     try:
         _wait_until_ready(url, proc=proc_uvicorn, timeout_s=30.0)
         yield "OK"
     finally:
-        try:
-            proc_uvicorn.terminate()
-            proc_uvicorn.wait(timeout=2)
-        except Exception:
-            try:
-                proc_uvicorn.kill()
-                proc_uvicorn.wait(timeout=2)
-            except Exception:
-                pass
-        
+        kill_proc(proc_arbiter)
+        kill_proc(proc_uvicorn)
         # _stop_redis(container_id)
 
 @pytest.fixture(scope="session")
-def client(host, port, server) -> PetClient:
-    client = PetClient(host, port, mode=PytanqueMode.HTTP)
+def client(host, port, server) -> PytanqueExtended:
+    client = PytanqueExtended(host, port)
     client.connect()
     return client
 
