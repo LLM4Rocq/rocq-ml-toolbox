@@ -9,7 +9,7 @@ from typing import Optional, Any
 from pytanque.client import RouteName
 from pytanque.routes import PETANQUE_ROUTES
 from .sessions import SessionManager
-
+from ..parser.ast.driver import load_ast_dump
 
 class JsonRpcBody(BaseModel):
     jsonrpc: str = "2.0"
@@ -69,3 +69,15 @@ def rpc_endpoint(body: JsonRpcBody, request: FastAPIRequest):
     )
     # result = dispatch_rpc(registry)
     return result.to_json()
+
+class GetAstBody(BaseModel):
+    path: str
+    force_dump: bool=False
+
+@app.post("/get_ast")
+def get_ast(body: GetAstBody):
+    """
+    Extract full AST (verbatim) from document at `path`.
+    """
+    output = {"value": load_ast_dump(body.path, force_dump=body.force_dump)}
+    return output
