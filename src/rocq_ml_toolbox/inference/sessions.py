@@ -28,7 +28,7 @@ from .redis_keys import (
     archived_sessions_key,
     session_assigned_idx_key
 )
-from .session_model import TacticsTree, MappingState, Session, State, QueryKwargs
+from .session_model import ParamsTree, MappingState, MappingTree, Session, State, QueryKwargs
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,8 @@ class SessionManager:
         self.worker_generations: List[Optional[int]] = [None] * num_pet_server
         self.sessions_cache: Dict[str, Session] = {} # session_id -> Session
         self.mappings_state_cache: Dict[str, MappingState] = {}
-        self.tactics_trees_cache: Dict[str, Optional[TacticsTree]] = {}
+        self.mappings_tree_cache: Dict[str, MappingTree] = {}
+        self.params_trees_cache: Dict[str, Dict[str, ParamsTree]] = {}
         self.num_pet_server = num_pet_server
         self.timeout_ok = timeout_ok
         self.timeout_eps = timeout_eps
@@ -97,11 +98,11 @@ class SessionManager:
             self.pytanques[pet_idx].close()
             self.pytanques[pet_idx] = None
 
-    def archive_session(self, session: Session, tactics_tree: TacticsTree):
+    def archive_session(self, session: Session, params_tree: ParamsTree):
         """Store session data in Redis for archival purposes."""
         entry = {
             "session": session.to_json(),
-            "tactics_tree": tactics_tree.to_json()
+            "params_tree": params_tree.to_json()
         }
         self.redis_client.rpush(archived_sessions_key(), json.dumps(entry))
 
@@ -156,47 +157,77 @@ class SessionManager:
         """Create a new session with load-balanced pet-server assignment."""
         assigned_idx = self.redis_client.incr(session_assigned_idx_key())
         assigned_idx = assigned_idx % self.num_pet_server
-        uid = str(uuid.uuid4())
-        session = Session(id=uid, pet_idx=assigned_idx)
-        session.to_redis(self.redis_client)
-        self.sessions_cache[session.id] = session
-        self.mappings_state_cache[session.id] = MappingState()
-        self.tactics_trees_cache[session.id] = None
+        session = Session(pet_idx=assigned_idx)
+        mapping_state = MappingState()
+        mapping_tree = MappingTree()
 
-        self.mappings_state_cache[session.id].to_redis(session, self.redis_client)
+        self.sessions_cache[session.id] = session
+        self.mappings_state_cache[session.id] = mapping_state
+        self.mappings_tree_cache[session.id] = mapping_tree
+        self.params_trees_cache[session.id] = {}
+
+        session.to_redis(self.redis_client)
+        mapping_state.to_redis(session, self.redis_client)
+        mapping_tree.to_redis(session, self.redis_client)
         return session.id
     
-    def mapping_state_cache_update(self, state: State, session: Session):
+    def mapping_state_cache_update(self, state: State, session: Session) -> MappingState:
         """
         Update mapping_state_cache if the state is both outdated and not in it.
         """
         current_generation = self.get_generation(session.pet_idx)
         if state.generation == current_generation:
-            return
+            return mapping_state
+        
         # check if session is in mappings_state_cache
         if session.id not in self.mappings_state_cache:
-            self.mappings_state_cache[session.id] = MappingState.from_redis(session, self.redis_client)
-            return
-        mapping_state = self.mappings_state_cache[session.id]
+            mapping_state = MappingState.from_redis(session, self.redis_client)
+            self.mappings_state_cache[session.id] = mapping_state
+        elif state not in self.mappings_state_cache[session.id]:
+            mapping_state = MappingState.from_redis(session, self.redis_client)
+            self.mappings_state_cache[session.id] = mapping_state
 
-        if state not in mapping_state:
-            self.mappings_state_cache[session.id] = MappingState.from_redis(session, self.redis_client)
+        mapping_state = self.mappings_state_cache[session.id]
+        return mapping_state
     
-    def tactics_tree_cache_update(self, state: State, session: Session):
+    def mapping_tree_cache_update(self, state: State, session: Session) -> MappingTree:
         """
-        Update tactics_trees_cache if the state is not in it.
+        Update mappings_tree_cache if the state is not in it.
         """
-        # check if session is in tactics_tree_cache
-        if session.id not in self.tactics_trees_cache or \
-            not self.tactics_trees_cache[session.id]:
-            self.tactics_trees_cache[session.id] = TacticsTree.from_redis(session, self.redis_client)
-            return
-        tactics_tree = self.tactics_trees_cache[session.id]
-        try:
-            tactics_tree.find_path(state)
-        except Exception:
-            # state not found, let's update the tactics_tree_cache.
-            self.tactics_trees_cache[session.id] = TacticsTree.from_redis(session, self.redis_client)
+
+        if session.id not in self.mappings_tree_cache:
+            mapping_tree_cache = MappingTree.from_redis(session, self.redis_client)
+            self.mappings_tree_cache[session.id] = mapping_tree_cache
+        elif state not in self.mappings_tree_cache[session.id]:
+            mapping_tree_cache = MappingTree.from_redis(session, self.redis_client)
+            self.mappings_tree_cache[session.id] = mapping_tree_cache
+
+        mapping_tree_cache = self.mappings_tree_cache[session.id]
+        if state not in mapping_tree_cache:
+            raise PetanqueError(-1, "State not found in updated mapping_tree_cache")
+        return mapping_tree_cache
+
+    def params_tree_cache_update(self, state: State, session: Session) -> ParamsTree:
+        """
+        Update params_trees_cache if the state is not in it.
+        """
+        mapping_tree = self.mapping_tree_cache_update(state, session)
+        tree_id = mapping_tree[state]
+
+        if session.id not in self.params_trees_cache:
+            params_tree_cache = ParamsTree.from_redis(session, tree_id, self.redis_client)
+            self.params_trees_cache[session.id] = {tree_id: params_tree_cache}
+        elif tree_id not in self.params_trees_cache[session.id]:
+            params_tree_cache = ParamsTree.from_redis(session, tree_id, self.redis_client)
+            self.params_trees_cache[session.id][tree_id] = params_tree_cache
+        elif state not in self.params_trees_cache[session.id][tree_id]:
+            params_tree_cache = ParamsTree.from_redis(session, tree_id, self.redis_client)
+            self.params_trees_cache[session.id][tree_id] = params_tree_cache
+        
+        params_tree_cache = self.params_trees_cache[session.id][tree_id]
+        if state not in params_tree_cache:
+            raise PetanqueError(-1, "State not found in updated params_tree_cache")
+        return params_tree_cache
 
     def update_state(self, state: State, session: Session, lock:Lock, timeout_run=60, timeout_get_state=120) -> State:
         """If state.generation is outdated, replay the tactics to recreate cache states on current pet-server."""
@@ -205,35 +236,32 @@ class SessionManager:
             return state # No need to replay
         worker = self._get_worker(session.pet_idx)
 
-        self.mapping_state_cache_update(state, session)
-        mapping_state = self.mappings_state_cache[session.id]
+        mapping_state = self.mapping_state_cache_update(state, session)
         if state in mapping_state:
             state_map = mapping_state[state]
             if state_map.generation == current_generation:
                 return state_map
         
-        self.tactics_tree_cache_update(state, session)
-        tactics_tree = self.tactics_trees_cache[session.id]
-        if tactics_tree:
-            lock.extend(timeout_get_state+self.timeout_eps, replace_ttl=True)
-            replay_session = tactics_tree.find_path(state)
-            logging.info(f"[{session.id}] State inconsistency, replay mechanism ON.")
-            for node in replay_session:
-                logging.info(f"[{session.id}] REPLAY: {node.query_kwargs.params}")
-                state = mapping_state.get(node.state_key, None)
-                    
-                # if state is outdated or None then regenerate it
-                if not state or state.generation < current_generation:
-                    query_kwargs = node.query_kwargs.from_json(node.query_kwargs.to_json())
-                    query_kwargs.params = self._update_params(query_kwargs.params, session, lock)
-                    query_res = worker.query(**vars(query_kwargs))
-                    query_res = require_session_response(query_res, **vars(query_kwargs))
-                    state = query_res.extract_response()
-                    state.generation = current_generation
-                    mapping_state.add(node.state_key, state)
-            mapping_state.to_redis(session,self.redis_client)
-        else:
-            raise SessionManagerError(f"Session {session.id} doesn't have any TacticsParent")
+        params_tree = self.params_tree_cache_update(state, session)
+        lock.extend(timeout_get_state+self.timeout_eps, replace_ttl=True)
+        replay_session = params_tree.find_path(state)
+        logging.info(f"[{session.id}] State inconsistency, replay mechanism ON.")
+        for node in replay_session:
+            logging.info(f"[{session.id}] REPLAY: {node.query_kwargs.params}")
+            state = mapping_state.get(node.state_key, None)
+                
+            # if state is outdated or None then regenerate it
+            if not state or state.generation < current_generation:
+                query_kwargs = node.query_kwargs.from_json(node.query_kwargs.to_json())
+                query_kwargs.params = self._update_params(query_kwargs.params, session, lock)
+
+                query_res = worker.query(**vars(query_kwargs))
+                query_res = require_session_response(query_res, **vars(query_kwargs))
+
+                state = query_res.extract_response()
+                state.generation = current_generation
+                mapping_state.add(node.state_key, state)
+        mapping_state.to_redis(session,self.redis_client)
         return state
     
     def send_kill_signal(self, pet_idx: int):
@@ -327,15 +355,19 @@ class SessionManager:
         state.generation = gen
 
         parent_state = params.extract_parent()
-        self.tactics_tree_cache_update(parent_state, session)
-        tactics_tree = self.tactics_trees_cache[session.id]
+        mapping_tree = self.mapping_tree_cache_update(parent_state, session)
+        tree_id = mapping_tree[parent_state]
 
-        parent_node = tactics_tree.find_node(parent_state)
+        params_tree = ParamsTree.from_redis(session, tree_id, self.redis_client)
+        parent_node = params_tree.find_node(parent_state)
 
+        # we keep track of "old" client side params/state
         query_args = QueryKwargs(route_name, params, timeout=timeout)
-        child = TacticsTree.from_state(state, query_args)
+        child = ParamsTree.from_state(state, query_args)
         parent_node.add_child(child)
-        tactics_tree.to_redis(session, self.redis_client)
+        params_tree.to_redis(session, self.redis_client)
+
+        self.mappings_tree_cache[session.id] = MappingTree.add_get_remote(state, params_tree, session, self.redis_client)
         return state
 
     @_after_pet_call.register
@@ -353,9 +385,12 @@ class SessionManager:
         sres = require_session_response(res, params=updated_params, route_name=route_name)
         state = sres.extract_response()
         state.generation = gen
+        
         query_args = QueryKwargs(route_name, params, timeout=timeout)
-        tactics_tree = TacticsTree.from_state(state, query_args)
-        tactics_tree.to_redis(session, self.redis_client)
+        params_tree = ParamsTree.from_state(state, query_args)
+        params_tree.to_redis(session, self.redis_client)
+        
+        self.mappings_tree_cache[session.id] = MappingTree.add_get_remote(state, params_tree, session, self.redis_client)
         return state
     
     def _pet_call(
