@@ -1,8 +1,9 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 import json
-from typing import List, Union, Any, Dict, Optional
-
+from typing import List, Union, Any, Dict, Optional, Self
+import uuid
+from abc import ABC, abstractmethod
 from pytanque.routes import RouteName, PETANQUE_ROUTES
 from pytanque.client import Params, State
 from redis import Redis
@@ -10,9 +11,8 @@ from redis import Redis
 def state_to_state_key(state: State) -> str:
     return f"{state.generation}:{state.st}"
     
-class RedisSerializable:
+class RedisSessionSerializable(ABC):
     redis_key: str
-
     def to_redis(self, session: Session, redis: Redis) -> None:
         key = f"{self.redis_key}:{session.id}"
         redis.set(key, json.dumps(self.to_json()))
@@ -22,11 +22,32 @@ class RedisSerializable:
         cls,
         session: Session,
         redis: Redis
-    ):
+    ) -> Self:
         key = f"{cls.redis_key}:{session.id}"
         raw = redis.get(key)
         if raw is None:
-            return None
+            raise Exception(f'{cls.__name__} not found')
+        return cls.from_json(json.loads(raw))
+
+class RedisIDSerializable(ABC):
+    redis_key: str
+    id: str
+
+    def to_redis(self, session: Session, redis: Redis) -> None:
+        key = f"{self.redis_key}:{session.id}:{self.id}"
+        redis.set(key, json.dumps(self.to_json()))
+
+    @classmethod
+    def from_redis(
+        cls,
+        session: Session,
+        id: str,
+        redis: Redis
+    ) -> Self:
+        key = f"{cls.redis_key}:{session.id}:{id}"
+        raw = redis.get(key)
+        if raw is None:
+            raise Exception(f'{cls.__name__} not found')
         return cls.from_json(json.loads(raw))
 
 @dataclass
@@ -53,29 +74,30 @@ class QueryKwargs:
         }
 
 @dataclass
-class TacticsTree(RedisSerializable):
+class ParamsTree(RedisIDSerializable):
     """
     Parent node, associated to a set of params to generate it.
     """
     state_key: str
     query_kwargs: QueryKwargs
-    children: List[TacticsTree]=field(default_factory=list)
-    parent: Optional[TacticsTree]=None
-    redis_key = "tactics_tree"
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    redis_key: str = "params_tree"
+    children: List[ParamsTree]=field(default_factory=list)
+    parent: Optional[ParamsTree]=None
 
     @classmethod
     def from_state(
         cls,
         state,
         query_kwargs: QueryKwargs
-    ) -> TacticsTree:
+    ) -> ParamsTree:
         return cls(state_key=state_to_state_key(state), query_kwargs=query_kwargs)
 
-    def add_child(self, child: TacticsTree) -> None:
+    def add_child(self, child: ParamsTree) -> None:
         child.parent = self
         self.children.append(child)
 
-    def find_node(self, state: State) -> TacticsTree:
+    def find_node(self, state: State) -> ParamsTree:
         state_key = state_to_state_key(state)
         if self.state_key == state_key:
             return self
@@ -87,15 +109,22 @@ class TacticsTree(RedisSerializable):
             stack.extend(node.children)
         raise Exception("State not found")
 
-    def trace_ancestors(self) -> list[TacticsTree]:
+    def __contains__(self, state: State) -> bool:
+        try:
+            self.find_node(state)
+            return True
+        except:
+            return False
+        
+    def trace_ancestors(self) -> list[ParamsTree]:
         path = []
         node = self
-        while isinstance(node, TacticsTree):
+        while node:
             path.append(node)
             node = node.parent
         return list(reversed(path))
 
-    def find_path(self, state: State) -> list[TacticsTree]:
+    def find_path(self, state: State) -> list[ParamsTree]:
         node = self.find_node(state)
         return node.trace_ancestors()
 
@@ -103,28 +132,30 @@ class TacticsTree(RedisSerializable):
         return {
             "state_key": self.state_key,
             "query_kwargs": self.query_kwargs.to_json(),
-            "children": [child.to_json() for child in self.children]
+            "children": [child.to_json() for child in self.children],
+            "id": self.id
         }
     
     @classmethod
-    def from_json(cls, data: dict) -> TacticsTree:
+    def from_json(cls, data: dict) -> ParamsTree:
         parent = cls(
+            id=data['id'],
             state_key=data.get("state_key"),
             query_kwargs=QueryKwargs.from_json(data["query_kwargs"]),
             children=[]
         )
 
         for child_data in data.get("children", []):
-            child = TacticsTree.from_json(child_data)
+            child = ParamsTree.from_json(child_data)
             child.parent = parent
             parent.children.append(child)
 
         return parent
 
 @dataclass
-class MappingState(RedisSerializable):
+class MappingState(RedisSessionSerializable):
     mapping: Dict[str, State]=field(default_factory=dict)
-    redis_key = "mapping_state"
+    redis_key: str ="mapping_state"
 
     @classmethod
     def from_json(cls, x:dict) -> MappingState:
@@ -156,9 +187,45 @@ class MappingState(RedisSerializable):
         self.mapping[old_state_key] = new_state
 
 @dataclass
-class Session:
-    id: str
+class MappingTree(RedisSessionSerializable):
+    mapping: Dict[str, str]=field(default_factory=dict)
+    redis_key = "mapping_tree"
+    
+    @classmethod
+    def from_json(cls, x:dict) -> MappingState:
+        return cls(x['mapping'])
+    
+    def to_json(self) -> Any:
+        return {
+            "mapping": self.mapping
+        }
+    
+    def _key(self, state_or_key: Union[State, str]) -> str:
+        return state_or_key if isinstance(state_or_key, str) else state_to_state_key(state_or_key)
+
+    def __getitem__(self, state_or_key: Union[State, str]) -> str:
+        state_key = self._key(state_or_key)
+        return self.mapping[state_key]
+    
+    def __contains__(self, state_or_key: Union[State, str]) -> bool:
+        state_key = self._key(state_or_key)
+        return state_key in self.mapping
+
+    def add(self, state_or_key: Union[State, str], params_tree: ParamsTree):
+        state_key = self._key(state_or_key)
+        self.mapping[state_key] = params_tree.id
+
+    @classmethod
+    def add_get_remote(cls, state_or_key: Union[State, str], params_tree: ParamsTree, session: Session, redis: Redis) -> MappingTree:
+        mapping_tree = MappingTree.from_redis(session, redis)
+        mapping_tree.add(state_or_key, params_tree)
+        mapping_tree.to_redis(session, redis)
+        return mapping_tree
+
+@dataclass
+class Session(RedisSessionSerializable):
     pet_idx: int                       # which pet-server index (0..num_pet_server-1)
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
     redis_key = "session"
 
     @classmethod
@@ -180,12 +247,12 @@ class Session:
 
     @classmethod
     def from_redis(
-        self,
+        cls,
         session_id: int,
         redis: Redis
     ) -> Session:
-        key = f"{self.redis_key}:{session_id}"
+        key = f"{cls.redis_key}:{session_id}"
         raw = redis.get(key)
         if raw is None:
-            return None
-        return self.from_json(json.loads(raw))
+            raise Exception(f'{cls.__name__} not found')
+        return cls.from_json(json.loads(raw))
