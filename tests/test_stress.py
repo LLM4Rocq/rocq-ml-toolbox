@@ -7,10 +7,17 @@ import random
 import psutil
 import time
 import threading
+import multiprocessing as mp
 
 from redis import Redis
 import pytest
 from filelock import FileLock
+from pytanque.protocol import (
+    Goal,
+    Inspect,
+    InspectGoals,
+    InspectPhysical
+)
 
 from rocq_ml_toolbox.parser.rocq_parser import Source, Theorem, VernacElement, RocqParser
 from pytanque import Pytanque
@@ -76,7 +83,7 @@ def coordinator(redis_url: str, fail_each_k=100, stop_event: threading.Event | N
                 else:
                     break
 
-            time.sleep(0.02)  # prevent busy spin
+            time.sleep(0.02)
 
         kill_all_proc("pet-server")
         time.sleep(5)
@@ -141,12 +148,53 @@ def test_replay_mono(host, port, stress_workers, to_prove, stress_n):
         state = client.get_state_at_pos(filepath, entry["line"], entry["character"])
         if random.random() < 0.3:
             kill_all_proc("pet-server")
-            time.sleep(5)
+            time.sleep(2)
         for step in entry["steps"]:
             state = client.run(state, step, timeout=15)
             if random.random() < 0.3:
                 kill_all_proc("pet-server")
                 time.sleep(5)
+
+def chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+@pytest.mark.replay_simultaneous
+def test_replay_simultaneous(host, port, stress_workers, to_prove, stress_n, redis_url):
+    selection = random.sample(to_prove, k=stress_n)
+
+    client = Pytanque(host, port, mode=PytanqueMode.HTTP)
+    client.connect()
+
+    for chunk in chunks(selection, stress_workers):
+        states = [None]*len(chunk)
+        for k, entry in enumerate(chunk):
+            state = client.get_state_at_pos(entry['filepath'], entry['line'], entry['character'], timeout=60)
+            states[k] = state
+        
+        iter_idx = 0
+
+        not_finish = True
+        inspect_goals = Inspect(InspectGoals())
+
+        while not_finish:
+            not_finish = True
+            if random.random() < 0.3:
+                kill_all_proc("pet-server")
+                time.sleep(2)
+            for k, entry in enumerate(chunk):
+                state = states[k]
+                if iter_idx < len(entry['steps']):
+                    not_finish = False
+                    tac = entry['steps'][iter_idx]
+                    new_state = client.run(state, tac, timeout=60)
+                    states[k] = new_state
+                else:
+                    tac = "idtac."
+                    new_state = client.run(state, tac, timeout=60)
+                    assert client.state_equal(new_state, state, inspect_goals)
+            iter_idx += 1
 
 @pytest.mark.replay
 def test_replay(host, port, stress_workers, to_prove, stress_n, redis_url):
@@ -167,9 +215,10 @@ def test_replay(host, port, stress_workers, to_prove, stress_n, redis_url):
         daemon=True,
     )
     coord_thread.start()
-
+    # to avoid python warning, we set an mp_context
+    ctx = mp.get_context("forkserver")
     try:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=stress_workers) as ex:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=stress_workers, mp_context=ctx) as ex:
             futures = [
                 ex.submit(try_proof_control, entry, host, port, redis_url)
                 for entry in selection
