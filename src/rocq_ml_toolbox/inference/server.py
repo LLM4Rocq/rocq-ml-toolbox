@@ -3,6 +3,7 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request as FastAPIRequest, HTTPException
 from fastapi.responses import PlainTextResponse
+import tempfile
 
 from pydantic import BaseModel
 from typing import Optional, Any
@@ -80,4 +81,13 @@ def get_ast(body: GetAstBody):
     Extract full AST (verbatim) from document at `path`.
     """
     output = {"value": load_ast_dump(body.path, force_dump=body.force_dump)}
+    return output
+
+@app.get("/empty_file")
+def empty_file():
+    """
+    Return the path of a new empty file.
+    """
+    fp = tempfile.NamedTemporaryFile(delete=False)
+    output = {"path": fp.name}
     return output

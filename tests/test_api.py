@@ -169,6 +169,11 @@ def test_query(client, server_file):
 def test_get_ast_endpoint(client, server_file):
     client.get_ast(server_file, force_dump=True)
 
+@pytest.mark.api
+def test_empty_file(client):
+    path = client.empty_file()
+    assert os.path.exists(path)
+
 # @pytest.mark.api
 # def test_get_session_endpoint(client):
 #     sess = client.get_session()
