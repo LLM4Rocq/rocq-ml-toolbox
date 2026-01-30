@@ -24,6 +24,13 @@ handlers:
     backupCount: 5
     formatter: default
 
+  profiling_file:
+    class: logging.handlers.RotatingFileHandler
+    filename: profiling.log
+    maxBytes: 10000000
+    backupCount: 5
+    formatter: default
+
 root:
   level: INFO
   handlers: [console, file]
@@ -42,4 +49,9 @@ loggers:
   pytanque:
     level: INFO
     handlers: [console, file]
+    propagate: false
+
+  profiling:
+    level: INFO
+    handlers: [profiling_file]
     propagate: false
