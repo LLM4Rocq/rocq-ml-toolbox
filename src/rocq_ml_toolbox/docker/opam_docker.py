@@ -29,8 +29,6 @@ class OpamDocker(BaseDocker):
         )
         self.opam_env_path = config.opam_env_path
         self.config = config
-        self.write_file('/tmp/init.v', '\n')
-
         if update_rocq_ml:
             self.exec_cmd([
                 "bash",

@@ -2,6 +2,7 @@
 
 from typing import List, Optional, Tuple, Generator, Dict, Union
 import re
+import tempfile
 
 from pytanque.protocol import State, Opts
 
@@ -62,10 +63,11 @@ class RocqParser:
         return dependencies
 
     def _extract_loadpath(self, timeout: int=30) -> Dict[str, str]:
+        path = self.client.empty_file()
         try:
-            state = self.client.get_root_state('/tmp/init.v')
+            state = self.client.get_root_state(path)
         except PetanqueError as e:
-            raise ParserError('Missing /tmp/init.v file.')
+            raise ParserError(f'Issue with temporary file: {path}')
         result = self.client.run(state, 'Print LoadPath.', timeout=timeout)
         return parse_loadpath(result.feedback[0][1])
 
