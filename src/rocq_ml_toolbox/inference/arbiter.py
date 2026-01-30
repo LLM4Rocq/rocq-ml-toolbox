@@ -1,23 +1,7 @@
-# arbiter_service.py
-#
-# Option 2: run the arbiter as its own process (separate from FastAPI/uvicorn).
-#
-# Usage examples:
-#   python -m yourpkg.arbiter_service
-# or (from project root):
-#   python yourpkg/arbiter_service.py
-#
-# This file replaces gunicorn on_starting/on_exit hooks with a standalone
-# long-running service that:
-# - cleans redis
-# - kills stray pet-server processes
-# - starts NUM_PET_SERVER pet-server instances
-# - monitors each instance (crash + RAM) and restarts when needed
-# - cleans up on SIGINT/SIGTERM
-
 from __future__ import annotations
 
 import os
+import json
 import time
 import signal
 import threading
@@ -31,6 +15,7 @@ from .redis_keys import (
     monitor_epoch_key,
     pet_status_key,
     generation_key,
+    pet_lock_key,
     PetStatus,
     ALL_KEYS_STAR,
 )
@@ -136,30 +121,16 @@ def restart_single_pet_server(pet_idx: int) -> None:
     redis_client.set(pet_status_key(pet_idx), PetStatus.OK)
     print(f"[arbiter] Restarted pet-server idx={pet_idx} on port {port}, pid={new_p.pid}", flush=True)
 
-
-def monitor_redis_for_restarts(pet_idx: int, poll_interval: float = 0.02) -> None:
+def monitor_ram(poll_interval=0.1) -> None:
     """
-    Monitor Redis pet_status:{idx} keys for RESTART_NEEDED, detect crashes,
-    and restart the corresponding pet-server. Also monitor RAM usage and
-    trigger restart if it exceeds MAX_RAM_PER_PET (MB).
+    Monitor RAM usage
     """
-    print(f"[arbiter] Monitor thread started for pet_idx={pet_idx}", flush=True)
-    epoch_key = monitor_epoch_key(pet_idx)
+    print(f"[arbiter] RAM Monitor started", flush=True)
 
     while not _stop_event.is_set():
         try:
-            p = pet_servers[pet_idx]
-            if p is None:
-                time.sleep(poll_interval)
-                continue
-
-            # 1) Detect crash
-            ret = p.poll()
-            if ret is not None:
-                print(f"[arbiter] Detected crashed pet-server idx={pet_idx}, code={ret}", flush=True)
-                redis_client.set(pet_status_key(pet_idx), PetStatus.RESTART_NEEDED)
-            else:
-                # 2) RAM check
+            for pet_idx in range(NUM_PET_SERVER):
+                p = pet_servers[pet_idx]
                 if MAX_RAM_PER_PET > 0:
                     try:
                         proc = psutil.Process(p.pid)
@@ -173,21 +144,49 @@ def monitor_redis_for_restarts(pet_idx: int, poll_interval: float = 0.02) -> Non
                             redis_client.set(pet_status_key(pet_idx), PetStatus.RESTART_NEEDED)
                     except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
                         print(f"[arbiter] RAM check failed for pet_idx={pet_idx}: {e}", flush=True)
-
-            # 3) React to restart flag
-            state = redis_client.get(pet_status_key(pet_idx))
-            if state and state.decode() == PetStatus.RESTART_NEEDED:
-                print(f"[arbiter] Restart requested for pet_idx={pet_idx}", flush=True)
-                redis_client.set(pet_status_key(pet_idx), PetStatus.RESTARTING)
-                restart_single_pet_server(pet_idx)
-
-            # 4) Monitor heartbeat
-            redis_client.incr(epoch_key, amount=1)
+                
+                time.sleep(poll_interval)
+        except Exception as e:
+            print(f"[arbiter] Error in RAM monitor: {e}", flush=True)
             time.sleep(poll_interval)
 
+    print(f"[arbiter] Monitor thread exiting for pet_idx={pet_idx}", flush=True)
+def monitor_redis_for_restarts(pet_idx: int) -> None:
+    """
+    Monitor Redis pet_status:{idx} keys for RESTART_NEEDED, detect crashes,
+    and restart the corresponding pet-server.
+    """
+    print(f"[arbiter] Monitor thread started for pet_idx={pet_idx}", flush=True)
+    ps = redis_client.pubsub()
+    ps.subscribe(f"arbiter:req:{pet_idx}")
+
+    while not _stop_event.is_set():
+        try:
+            for msg in ps.listen():
+                if msg["type"] != "message":
+                    continue
+            
+                req = json.loads(msg["data"])
+                reply_channel = req["reply_to"]
+                req_id = req["id"]
+
+                p = pet_servers[pet_idx]
+                # 1) Detect crash
+                ret = p.poll()
+                if ret is not None:
+                    print(f"[arbiter] Detected crashed pet-server idx={pet_idx}, code={ret}", flush=True)
+                    redis_client.set(pet_status_key(pet_idx), PetStatus.RESTART_NEEDED)
+                # 2) React to restart flag
+                state = redis_client.get(pet_status_key(pet_idx))
+                if state and state.decode() == PetStatus.RESTART_NEEDED:
+                    print(f"[arbiter] Restart requested for pet_idx={pet_idx}", flush=True)
+                    restart_single_pet_server(pet_idx)
+                
+                resp = {"id": req_id, "resp": "OK"}
+                redis_client.publish(reply_channel, json.dumps(resp))
         except Exception as e:
             print(f"[arbiter] Error in monitor thread pet_idx={pet_idx}: {e}", flush=True)
-            time.sleep(poll_interval)
+            time.sleep(1)
 
     print(f"[arbiter] Monitor thread exiting for pet_idx={pet_idx}", flush=True)
 
@@ -213,6 +212,10 @@ def main() -> None:
     kill_all_pet()
     start_pet_servers()
 
+    t = threading.Thread(target=monitor_ram, daemon=True)
+    t.start()
+    monitor_threads.append(t)
+    
     # Start monitor threads
     for pet_idx in range(NUM_PET_SERVER):
         t = threading.Thread(target=monitor_redis_for_restarts, args=(pet_idx,), daemon=True)

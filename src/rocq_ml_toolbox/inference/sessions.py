@@ -2,14 +2,14 @@ from __future__ import annotations
 import time
 from typing import List, Optional, Dict, Tuple, Any, Iterator, cast
 from contextlib import contextmanager
-from functools import singledispatchmethod
+from functools import singledispatchmethod, wraps
 from dataclasses import fields
 import logging
 import json
 import uuid
 
 
-from pytanque import Pytanque, PetanqueError
+from pytanque import Pytanque, PetanqueError, PytanqueMode
 from pytanque.client import Params
 from pytanque.response import BaseResponse, SessionResponse, Response
 from pytanque.params import SessionParams, PrimitiveParams
@@ -31,6 +31,7 @@ from .redis_keys import (
 from .session_model import ParamsTree, MappingState, MappingTree, Session, State, QueryKwargs
 
 logger = logging.getLogger(__name__)
+profiling_logger = logging.getLogger("profiling")
 
 def require_session_response(res: BaseResponse, *, params: Params, route_name: RouteName, **kwargs) -> SessionResponse:
     if not isinstance(res, SessionResponse):
@@ -46,6 +47,21 @@ def normalize_payload(obj):
     if hasattr(obj, "to_json") and callable(obj.to_json):
         return obj.to_json()
     return obj
+
+def log_timing(name: str | None = None):
+    def decorator(fn):
+        fn_name = name or fn.__qualname__
+
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            start = time.perf_counter()
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                elapsed = time.perf_counter() - start
+                profiling_logger.info("%s took %.3f ms", fn_name, elapsed * 1000)
+        return wrapper
+    return decorator
 
 class SessionManagerError(Exception):
     def __init__(self, message, require_restart=False):
@@ -74,6 +90,7 @@ class SessionManager:
             raise SessionManagerError("Unknown session_id")
         return int(data)
 
+    @log_timing()
     def _get_worker(self, pet_idx: int) -> Pytanque:
         """Return a connected Pytanque client for pet_idx, recreating if generation changed."""
         current_gen = self.get_generation(pet_idx)
@@ -86,7 +103,7 @@ class SessionManager:
             except Exception:
                 pass
 
-        worker = Pytanque("127.0.0.1", self.ports[pet_idx])
+        worker = Pytanque("127.0.0.1", self.ports[pet_idx], mode=PytanqueMode.SOCKET)
         worker.connect()
         self.pytanques[pet_idx] = worker
         self.worker_generations[pet_idx] = current_gen
@@ -114,30 +131,45 @@ class SessionManager:
                 return False
         return True
 
-    def ensure_pet_ok(self, pet_idx: int, timeout=15, poll_interval=0.1):
-        """Ensure that the pet-server at pet_idx is in OK state."""
-        epoch_key = monitor_epoch_key(pet_idx)
+    @log_timing()
+    def ensure_pet_ok(self, pet_idx: int, timeout=15):
+        req_id = str(uuid.uuid4())
+        reply_channel = f"arbiter:reply:{pet_idx}:{req_id}"
 
-        # Record the monitor epoch at the time we start
-        start_epoch_raw = self.redis_client.get(epoch_key)
-        start_epoch = int(start_epoch_raw) if start_epoch_raw is not None else 0
+        ps = self.redis_client.pubsub(ignore_subscribe_messages=True)
+        ps.subscribe(reply_channel)
 
-        # wait for a potential failure detection from the arbiter
-        state = self.redis_client.get(pet_status_key(pet_idx))
-        if state is None:
-            raise SessionManagerError(f"pet_idx {pet_idx} has no status")
-        
-        t0 = time.time()
-        while time.time() - t0 < timeout:
+        try:
+            req = {"id": req_id, "reply_to": reply_channel}
+            self.redis_client.publish(f"arbiter:req:{pet_idx}", json.dumps(req))
+
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                msg = ps.get_message(timeout=1.0)
+                if not msg:
+                    continue
+                if msg["type"] != "message":
+                    continue
+
+                resp = json.loads(msg["data"])
+                if resp.get("id") == req_id:
+                    # optionally validate resp["state"] etc.
+                    return
+
+            # timed out waiting for arbiter reply; decide based on state key
             state = self.redis_client.get(pet_status_key(pet_idx))
-            epoch_raw = self.redis_client.get(epoch_key)
-            epoch = int(epoch_raw) if epoch_raw is not None else 0
+            raise SessionManagerError(
+                f"pet_idx {pet_idx} not available (no arbiter reply, state={state})",
+                require_restart=True,
+            )
+        finally:
+            try:
+                ps.unsubscribe(reply_channel)
+            finally:
+                ps.close()
 
-            if state is not None and state.decode() == PetStatus.OK and epoch > start_epoch:
-                return
-            time.sleep(poll_interval)
-        raise SessionManagerError(f"pet_idx {pet_idx} not available (state={state})", require_restart=True)
 
+    @log_timing()
     def acquire_pet_lock(self, pet_idx: int, timeout: int=10) -> Lock:
         """
         Acquire a Redis lock for a given pet_idx.
@@ -171,6 +203,7 @@ class SessionManager:
         mapping_tree.to_redis(session, self.redis_client)
         return session.id
     
+    @log_timing()
     def mapping_state_cache_update(self, state: State, session: Session) -> MappingState:
         """
         Update mapping_state_cache if the state is both outdated and not in it.
@@ -190,6 +223,7 @@ class SessionManager:
         mapping_state = self.mappings_state_cache[session.id]
         return mapping_state
     
+    @log_timing()
     def mapping_tree_cache_update(self, state: State, session: Session) -> MappingTree:
         """
         Update mappings_tree_cache if the state is not in it.
@@ -207,6 +241,7 @@ class SessionManager:
             raise PetanqueError(-1, "State not found in updated mapping_tree_cache")
         return mapping_tree_cache
 
+    @log_timing()
     def params_tree_cache_update(self, state: State, session: Session) -> ParamsTree:
         """
         Update params_trees_cache if the state is not in it.
@@ -229,6 +264,7 @@ class SessionManager:
             raise PetanqueError(-1, "State not found in updated params_tree_cache")
         return params_tree_cache
 
+    @log_timing()
     def update_state(self, state: State, session: Session, lock:Lock, timeout_run=60, timeout_get_state=120) -> State:
         """If state.generation is outdated, replay the tactics to recreate cache states on current pet-server."""
         current_generation = self.get_generation(session.pet_idx)
@@ -269,6 +305,7 @@ class SessionManager:
         self.redis_client.set(pet_status_key(pet_idx), PetStatus.RESTART_NEEDED)
         self._restart_worker(pet_idx)
 
+    @log_timing()
     def _update_params(
             self,
             params: Params,
@@ -339,6 +376,7 @@ class SessionManager:
         return res
 
     @_after_pet_call.register
+    @log_timing('after_pet_call session case')
     def _(
         self,
         params: SessionParams,
@@ -371,6 +409,7 @@ class SessionManager:
         return state
 
     @_after_pet_call.register
+    @log_timing('after_pet_call primitive case')
     def _(
         self,
         params: PrimitiveParams,
