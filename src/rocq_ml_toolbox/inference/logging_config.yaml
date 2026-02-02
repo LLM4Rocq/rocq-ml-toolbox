@@ -46,9 +46,14 @@ loggers:
     handlers: [access_file]
     propagate: false
 
+  session:
+    level: INFO
+    handlers: [file]
+    propagate: false
+
   pytanque:
     level: INFO
-    handlers: [console, file]
+    handlers: [file]
     propagate: false
 
   profiling:
