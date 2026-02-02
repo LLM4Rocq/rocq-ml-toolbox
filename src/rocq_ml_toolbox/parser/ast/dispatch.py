@@ -22,6 +22,7 @@ from .vernac import (
     parse_reserved_notation,
     parse_start_theorem_proof,
     parse_declare_module_type,
+    parse_syntactic_definition,
     simple,
 )
 
@@ -41,7 +42,7 @@ PARSERS: dict[str, Callable[[dict], AstNode | None]] = {
     "VernacContext": simple(VernacKind.CONTEXT),
     "VernacDefinition": parse_definition,
     "VernacArguments": simple(VernacKind.ARGUMENTS),
-    "VernacSyntacticDefinition": simple(VernacKind.SYNTACTIC_DEFINITION),
+    "VernacSyntacticDefinition": parse_syntactic_definition,
     "VernacReserve": simple(VernacKind.RESERVE),
     "VernacStartTheoremProof": parse_start_theorem_proof,
     "VernacProof": simple(VernacKind.PROOF),
