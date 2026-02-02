@@ -30,7 +30,7 @@ from .redis_keys import (
 )
 from .session_model import ParamsTree, MappingState, MappingTree, Session, State, QueryKwargs
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("session")
 profiling_logger = logging.getLogger("profiling")
 
 def require_session_response(res: BaseResponse, *, params: Params, route_name: RouteName, **kwargs) -> SessionResponse:
