@@ -10,7 +10,7 @@ from .utils.ast import list_dependencies
 from .utils.message import parse_about, parse_loadpath, solve_physical_path
 from .utils.position import pos_to_offset, offset_to_pos
 
-from .ast.model import VernacKind, VernacElement
+from .ast.model import VernacKind, VernacElement, Span
 from .parser import Source, Theorem, ParserError, Step
 
 from pytanque import PetanqueError
@@ -79,6 +79,71 @@ class RocqParser:
             entry.data['content'] = content_utf_8[entry.span.bp:entry.span.ep].decode("utf-8")
         return toc
     
+    def ast(self, source: Source) -> Tuple[List[VernacElement], List[VernacElement]]:
+        ast = self.client.get_ast(source.path)
+        target_elements = []
+        proof_elements = []
+        namespaces_stack = []
+
+        targets_kind = [
+            VernacKind.DEFINITION,
+            VernacKind.SYNTACTIC_DEFINITION,
+            VernacKind.START_THEOREM_PROOF,
+            VernacKind.NOTATION,
+            VernacKind.RESERVED_NOTATION,
+            VernacKind.FIXPOINT,
+            VernacKind.COFIXPOINT,
+            VernacKind.COERCION,
+            VernacKind.CANONICAL,
+            VernacKind.INSTANCE,
+            VernacKind.INDUCTIVE,
+            VernacKind.COINDUCTIVE,
+            VernacKind.RECORD,
+            VernacKind.STRUCTURE,
+            VernacKind.VARIANT,
+            VernacKind.CLASS,
+            VernacKind.LTAC,
+            VernacKind.CONSTANT,
+            VernacKind.FIELD,
+            VernacKind.CONSTRUCTOR
+        ]
+        proofs_kind = [
+            VernacKind.PROOF,
+            VernacKind.PROOF_STEP,
+            VernacKind.SUBPROOF,
+            VernacKind.END_SUBPROOF,
+            VernacKind.BULLET,
+            VernacKind.PROOF,
+            VernacKind.END_PROOF
+        ]
+        for entry in ast:
+            kind = entry.kind
+            match kind:
+                case VernacKind.BEGIN_SECTION:
+                    if entry.name:
+                        namespaces_stack.append(("SECTION", entry.name))
+                case VernacKind.DECLARE_MODULE_TYPE| VernacKind.DEFINE_MODULE:
+                    if not entry.data['is_alias'] and entry.name:
+                        namespaces_stack.append(("MODULE", entry.name))
+                case VernacKind.END_SEGMENT:
+                    last_el = namespaces_stack.pop()
+                    assert entry.name == last_el[1]
+                case _ if kind in targets_kind:
+                    stack_modules = [el[1] for el in namespaces_stack if el[0] == 'MODULE']
+                    history = [el[1] for el in namespaces_stack]
+                    if not entry.name:
+                        continue
+                    stack_modules.append(entry.name)
+                    history.append(entry.name)
+                    full_name = ".".join(stack_modules)
+                    history_name = ".".join(history)
+                    entry.data['fqn'] = full_name
+                    entry.data['history_name'] = history_name
+                    target_elements.append(entry)
+                case _ if kind in proofs_kind:
+                    proof_elements.append(entry)
+        return target_elements, proof_elements
+
     def extract_proofs_raw(self, source: Source) -> List[Tuple[VernacElement, List[str]]]:
         ast = self.client.get_ast(source.path)
         proof_open = False
