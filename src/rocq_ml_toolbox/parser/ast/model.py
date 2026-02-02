@@ -36,8 +36,8 @@ class AstNode:
         """Build an AstNode from a dictionary representation."""
         return cls(
             span=Span.from_json(d['span']) if 'span' in d else None,
-            range=Span.from_json(d['range']) if 'range' in d else None,
-            name=Span.from_json(d['name']) if 'name' in d else None
+            range=Range.from_json(d['range']) if 'range' in d else None,
+            name=d['name'] if 'name' in d else None
         )
 
     def to_json(self) -> Any:
