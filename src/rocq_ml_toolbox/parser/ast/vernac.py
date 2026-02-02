@@ -141,7 +141,7 @@ def parse_instance(obj: dict) -> VernacElement:
         if subobj[0] == "Anonymous":
             name = None
         else:
-            name = ensure_str(jmaybe(subobj, 1, 0, default=None))
+            name = ensure_str(jmaybe(subobj, 1, 1, default=None))
     return VernacElement(span=span, kind=VernacKind.INSTANCE, name=name)
 
 
