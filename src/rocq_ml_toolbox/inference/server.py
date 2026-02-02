@@ -88,6 +88,6 @@ def empty_file():
     """
     Return the path of a new empty file.
     """
-    fp = tempfile.NamedTemporaryFile(delete=False)
+    fp = tempfile.NamedTemporaryFile(delete=False, suffix='.v')
     output = {"path": fp.name}
     return output
