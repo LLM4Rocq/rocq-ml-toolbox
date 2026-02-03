@@ -9,11 +9,8 @@ import json
 import uuid
 
 
-from pytanque import Pytanque, PetanqueError, PytanqueMode
-from pytanque.client import Params
-from pytanque.response import BaseResponse, SessionResponse, Response
-from pytanque.params import SessionParams, PrimitiveParams
-from pytanque.routes import RouteName
+from pytanque import Pytanque, PetanqueError, PytanqueMode, Response
+from pytanque.routes import Params, PETANQUE_ROUTES, UniversalRoute, BaseRoute, SessionRoute, InitialSessionRoute, Routes, Responses, RouteName
 
 import redis
 from redis.lock import Lock
@@ -33,12 +30,12 @@ from .session_model import ParamsTree, MappingState, MappingTree, Session, State
 logger = logging.getLogger("session")
 profiling_logger = logging.getLogger("profiling")
 
-def require_session_response(res: BaseResponse, *, params: Params, route_name: RouteName, **kwargs) -> SessionResponse:
-    if not isinstance(res, SessionResponse):
+def require_session_route(route: Routes, **kwargs) -> SessionRoute:
+    if not isinstance(route, SessionRoute):
         raise SessionManagerError(
-            f"{type(params).__name__} on {route_name} expects SessionResponse, got {type(res).__name__}"
+            f"expects SessionRoute, got {type(route).__name__}"
         )
-    return cast(SessionResponse, res)
+    return cast(SessionRoute, route)
 
 def normalize_payload(obj):
     """
@@ -265,7 +262,7 @@ class SessionManager:
         return params_tree_cache
 
     @log_timing()
-    def update_state(self, state: State, session: Session, lock:Lock, timeout_run=60, timeout_get_state=120) -> State:
+    def update_state(self, state: State, route: Routes, session: Session, lock:Lock, timeout_run=60, timeout_get_state=120) -> State:
         """If state.generation is outdated, replay the tactics to recreate cache states on current pet-server."""
         current_generation = self.get_generation(session.pet_idx)
         if state.generation == current_generation:
@@ -289,12 +286,12 @@ class SessionManager:
             # if state is outdated or None then regenerate it
             if not state or state.generation < current_generation:
                 query_kwargs = node.query_kwargs.from_json(node.query_kwargs.to_json())
-                query_kwargs.params = self._update_params(query_kwargs.params, session, lock)
+                query_kwargs.params = self._update_params(query_kwargs.params, route, session, lock)
 
                 query_res = worker.query(**vars(query_kwargs))
-                query_res = require_session_response(query_res, **vars(query_kwargs))
+                route = require_session_route(route)
 
-                state = query_res.extract_response()
+                state = route.extract_response(query_res)
                 state.generation = current_generation
                 mapping_state.add(node.state_key, state)
         mapping_state.to_redis(session,self.redis_client)
@@ -309,6 +306,7 @@ class SessionManager:
     def _update_params(
             self,
             params: Params,
+            route: Routes,
             session: Session,
             lock: Lock
     ):
@@ -316,7 +314,7 @@ class SessionManager:
         for field in fields(new_params):
             state = getattr(new_params, field.name)
             if isinstance(state, State):
-                new_state = self.update_state(state, session, lock)
+                new_state = self.update_state(state, route, session, lock)
                 setattr(new_params, field.name, new_state)
         return new_params
 
@@ -324,6 +322,7 @@ class SessionManager:
     def _pet_ctx(
         self,
         session_id: str,
+        route: Routes,
         params: Params
     ) -> Iterator[Tuple[Session, Pytanque, Lock, Params]]:
         session = Session.from_redis(session_id, self.redis_client)
@@ -335,7 +334,7 @@ class SessionManager:
             # in rare cases pet server may have crashed between the first `from_redis`, and the Lock acquire
             session = Session.from_redis(session_id, self.redis_client)
             worker = self._get_worker(session.pet_idx)
-            updated_params = self._update_params(params, session, lock)
+            updated_params = self._update_params(params, route, session, lock)
             yield session, worker, lock, updated_params
 
         except PetanqueError as e:
@@ -364,12 +363,13 @@ class SessionManager:
     @singledispatchmethod
     def _after_pet_call(
         self,
+        route: Routes,
         params: Params,
         updated_params: Params,
         *,
         session: Session,
         route_name: RouteName,
-        res: BaseResponse,
+        res: Responses,
         gen: int,
         timeout: Optional[float],
     ) -> None:
@@ -379,20 +379,20 @@ class SessionManager:
     @log_timing('after_pet_call session case')
     def _(
         self,
-        params: SessionParams,
-        updated_params: SessionParams,
+        route: SessionRoute,
+        params: Params,
+        updated_params: Params,
         *,
         session: Session,
         route_name: RouteName,
-        res: BaseResponse,
+        res: Responses,
         gen: int,
         timeout: Optional[float],
     ) -> None:
-        sres = require_session_response(res, params=params, route_name=route_name)
-        state = sres.extract_response()
+        state = route.extract_response(res)
         state.generation = gen
 
-        parent_state = params.extract_parent()
+        parent_state = route.extract_parent(params)
         mapping_tree = self.mapping_tree_cache_update(parent_state, session)
         tree_id = mapping_tree[parent_state]
 
@@ -412,17 +412,17 @@ class SessionManager:
     @log_timing('after_pet_call primitive case')
     def _(
         self,
-        params: PrimitiveParams,
-        updated_params: PrimitiveParams,
+        route: InitialSessionRoute,
+        params: Params,
+        updated_params: Params,
         *,
         session: Session,
         route_name: RouteName,
-        res: BaseResponse,
+        res: Responses,
         gen: int,
         timeout: Optional[float],
     ) -> None:
-        sres = require_session_response(res, params=updated_params, route_name=route_name)
-        state = sres.extract_response()
+        state = route.extract_response(res)
         state.generation = gen
         
         query_args = QueryKwargs(route_name, params, timeout=timeout)
@@ -441,7 +441,8 @@ class SessionManager:
         timeout: Optional[float] = None,
     ) -> Any:
         # TODO: set_workspace is not manage right now
-        with self._pet_ctx(session_id, params=params) as (session, worker, lock, updated_params):
+        route = PETANQUE_ROUTES[route_name]
+        with self._pet_ctx(session_id, route, params=params) as (session, worker, lock, updated_params):
             logging.info(f"[{session.id}] {route_name}: {params}")
             ttl = (timeout or self.timeout_ok) + self.timeout_eps
             lock.extend(ttl, replace_ttl=True)
@@ -453,6 +454,7 @@ class SessionManager:
             
             gen = self.get_generation(session.pet_idx)
             res_update = self._after_pet_call(
+                route,
                 params,
                 updated_params,
                 session=session,
