@@ -134,11 +134,9 @@ class RocqParser:
                     if not entry.name:
                         continue
                     stack_modules.append(entry.name)
-                    history.append(entry.name)
                     full_name = ".".join(stack_modules)
-                    history_name = ".".join(history)
                     entry.data['fqn'] = full_name
-                    entry.data['history_name'] = history_name
+                    entry.data['history'] = ".".join(history)
                     target_elements.append(entry)
                 case _ if kind in proofs_kind:
                     proof_elements.append(entry)
