@@ -11,8 +11,7 @@ from pytanque.protocol import (
     InspectPhysical
 )
 from pytanque.client import RouteName
-from pytanque.params import StartParams
-from pytanque.response import GoalsResponse, StartResponse
+from pytanque.routes import StartParams, GoalsResponse, StartResponse
 from rocq_ml_toolbox.inference.session_model import State
 
 
