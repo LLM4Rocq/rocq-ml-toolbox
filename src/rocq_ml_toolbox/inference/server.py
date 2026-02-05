@@ -11,6 +11,7 @@ from pytanque.client import RouteName
 from pytanque.routes import PETANQUE_ROUTES
 from .sessions import SessionManager
 from ..parser.ast.driver import load_ast_dump
+from ..parser.glob.driver import load_glob_file
 
 class JsonRpcBody(BaseModel):
     jsonrpc: str = "2.0"
@@ -58,7 +59,7 @@ def health():
 @app.post("/rpc")
 def rpc_endpoint(body: JsonRpcBody, request: FastAPIRequest):
     session_manager: SessionManager = request.app.state.sm
-    params_cls = PETANQUE_ROUTES.get(body.route_name).params_cls
+    params_cls = PETANQUE_ROUTES[body.route_name].params_cls
     params_obj = params_cls.from_json(body.params)
 
     result = session_manager._pet_call(
@@ -75,12 +76,24 @@ class GetAstBody(BaseModel):
     path: str
     force_dump: bool=False
 
+class GetGlobBody(BaseModel):
+    path: str
+    force_compile: bool=False
+
 @app.post("/get_ast")
 def get_ast(body: GetAstBody):
     """
     Extract full AST (verbatim) from document at `path`.
     """
     output = {"value": load_ast_dump(body.path, force_dump=body.force_dump)}
+    return output
+
+@app.post("/get_glob")
+def get_glob(body: GetGlobBody):
+    """
+    Extract full AST (verbatim) from document at `path`.
+    """
+    output = {"value": load_glob_file(body.path, force_compile=body.force_compile)}
     return output
 
 @app.get("/empty_file")
