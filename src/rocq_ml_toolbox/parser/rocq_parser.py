@@ -3,6 +3,7 @@
 from typing import List, Optional, Tuple, Generator, Dict, Union
 import re
 import tempfile
+from collections import defaultdict
 
 from pytanque.protocol import State, Opts
 
@@ -10,6 +11,7 @@ from .utils.ast import list_dependencies
 from .utils.message import parse_about, parse_loadpath, solve_physical_path
 from .utils.position import pos_to_offset, offset_to_pos
 
+from .glob.parser import GlobDefinition, GlobKind
 from .ast.model import VernacKind, VernacElement, Span
 from .parser import Source, Theorem, ParserError, Step
 
@@ -78,13 +80,41 @@ class RocqParser:
         for entry in toc:
             entry.data['content'] = content_utf_8[entry.span.bp:entry.span.ep].decode("utf-8")
         return toc
+
+    def scan_glob_for_hb(self, source: Source) -> Dict[str, VernacElement]:
+        glob = self.client.get_glob(source.path)
+        span_to_glob: Dict[str, List[GlobDefinition]] = defaultdict(list)
+        for entry in glob.entries:
+            if isinstance(entry, GlobDefinition):
+                key = f"{entry.bp}:{entry.ep}"
+                span_to_glob[key].append(entry)
+        
+        result = {}
+        for lst_entries in span_to_glob.values():
+            name = None
+            span = None
+            for entry in lst_entries:
+                
+                if entry.kind == GlobKind.ABBREV:
+                    name = entry.secpath
+                    span = Span(entry.bp, entry.ep+1)
+                    break
+
+            if name and span and not name.startswith('Builders_'):
+                el = VernacElement(VernacKind.HB, span=span, name=name)
+                key = f"{span.bp}:{span.ep}"
+                result[key] = el
+        return result
     
-    def ast(self, source: Source) -> Tuple[List[VernacElement], List[VernacElement]]:
+    def ast(self, source: Source, check_hb=True) -> Tuple[List[VernacElement], List[VernacElement]]:
         ast = self.client.get_ast(source.path)
+    
         target_elements = []
         proof_elements = []
         namespaces_stack = []
-
+        hb_candidates = {}
+        if check_hb:
+            hb_candidates = self.scan_glob_for_hb(source)
         targets_kind = [
             VernacKind.DEFINITION,
             VernacKind.SYNTACTIC_DEFINITION,
@@ -118,6 +148,19 @@ class RocqParser:
         ]
         for entry in ast:
             kind = entry.kind
+            if kind == VernacKind.EXTEND:
+                if check_hb and entry.name and entry.name.startswith('ElpiHB'):
+                    span = entry.span
+                    key = f"{span.bp}:{span.ep}"
+                    if key in hb_candidates:
+                        hb_entry = hb_candidates[key]
+                        stack_modules = [el[1] for el in namespaces_stack if el[0] == 'MODULE']
+                        history = [el[1] for el in namespaces_stack]
+                        stack_modules.append(hb_entry.name)
+                        full_name = ".".join(stack_modules)
+                        hb_entry.data['fqn'] = full_name
+                        hb_entry.data['history'] = ".".join(history)
+                        target_elements.append(hb_entry)
             match kind:
                 case VernacKind.BEGIN_SECTION:
                     if entry.name:
