@@ -111,6 +111,7 @@ class VernacKind(StrEnum):
     CONSTANT = auto()
     FIELD = auto()
     CONSTRUCTOR = auto()
+    HB = auto() # TODO: right now, we don't get it from the AST
     
 
 @dataclass
