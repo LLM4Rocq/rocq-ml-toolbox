@@ -5,7 +5,8 @@ from typing import List, Dict, Any, Optional, Union
 from functools import cached_property
 
 from pytanque.protocol import Range, Position, Goal
-from .ast.model import VernacElement
+
+from .ast.model import VernacElement, Span
 
 @dataclass
 class Step:
@@ -90,6 +91,9 @@ class Source:
     @cached_property
     def content_utf8(self) -> bytes:
         return self.content.encode("utf-8")
+
+    def extract_span(self, span: Span) -> str:
+        return self.content_utf8[span.bp:span.ep].decode('utf-8')
 
 class ParserError(Exception):
     """Base class for parser error"""
