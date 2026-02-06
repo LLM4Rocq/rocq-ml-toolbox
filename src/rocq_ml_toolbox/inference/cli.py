@@ -10,14 +10,30 @@ from pathlib import Path
 DEFAULT_APP = "rocq_ml_toolbox.inference.server:app"
 DEFAULT_CONFIG = "python:rocq_ml_toolbox.inference.gunicorn_config"
 
+def popen_detached(cmd, env, pidfile: str | None = None):
+    with open(os.devnull, "rb") as devnull_in, open(os.devnull, "wb") as devnull_out:
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdin=devnull_in,
+            stdout=devnull_out,
+            stderr=devnull_out,
+            start_new_session=True
+        )
+
+    if pidfile:
+        Path(pidfile).write_text(str(proc.pid))
+
+    return proc
+
 def main(argv: Optional[List[str]] = None) -> None:
     p = argparse.ArgumentParser(prog="rocq-ml-server")
     p.add_argument("-H", "--host", default="0.0.0.0")
+    p.add_argument("-d", "--detached", action="store_true", help="Run server in background (detach from terminal).")
     p.add_argument("-p", "--port", type=int, default=5000)
     p.add_argument("-w", "--workers", type=int, default=21)
     p.add_argument("-t", "--timeout", type=int, default=600)
     p.add_argument("-l", "--log", action="store_true", default=False)
-    p.add_argument("-d", "--detached", action="store_true", help="Run gunicorn in the background (daemon mode).")
     p.add_argument("--pidfile", default="rocq-ml-server.pid", help="PID file (with --detached).")
     p.add_argument("--num-pet-server", type=int, default=4)
     p.add_argument("--pet-server-start-port", type=int, default=8765)
@@ -27,7 +43,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("--config", default=DEFAULT_CONFIG)
 
     args = p.parse_args(argv)
-
+    
     uvicorn_cmd = [
         "uvicorn",
         "rocq_ml_toolbox.inference.server:app",
@@ -48,16 +64,27 @@ def main(argv: Optional[List[str]] = None) -> None:
     env["REDIS_URL"] = str(args.redis_url)    
     
     print("Starting arbiter...")
-    arbiter_proc = subprocess.Popen(arbiter_cmd, env=env)
+    arbiter_proc = popen_detached(
+        arbiter_cmd,
+        env=env,
+        pidfile=args.pidfile + ".arbiter" if args.detached else None,
+    )
 
-    try:
-        subprocess.run(uvicorn_cmd, env=env, check=True)
-    except KeyboardInterrupt:
-        print("\nStopping server and arbiter...")
-    finally:
-        # Ensure the arbiter is killed when the server stops
-        arbiter_proc.terminate()
+    if args.detached:
+        popen_detached(
+            uvicorn_cmd,
+            env=env,
+            pidfile=args.pidfile,
+        )
+    else:
         try:
-            arbiter_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            arbiter_proc.kill()
+            subprocess.run(uvicorn_cmd, env=env, check=True)
+        except KeyboardInterrupt:
+            print("\nStopping server and arbiter...")
+        finally:
+            # Ensure the arbiter is killed when the server stops
+            arbiter_proc.terminate()
+            try:
+                arbiter_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                arbiter_proc.kill()
