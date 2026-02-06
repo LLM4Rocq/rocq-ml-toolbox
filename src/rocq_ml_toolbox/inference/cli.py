@@ -62,7 +62,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     env["NUM_PET_SERVER"] = str(args.num_pet_server)
     env["PET_SERVER_START_PORT"] = str(args.pet_server_start_port)
     env["MAX_RAM_PER_PET"] = str(args.max_ram_per_pet)
-    env["REDIS_URL"] = str(args.redis_url)    
+    env["REDIS_URL"] = str(args.redis_url)
+    env["PET_CMD"] = str(args.pet_server_cmd)    
     
     print("Starting arbiter...")
     arbiter_proc = popen_detached(
