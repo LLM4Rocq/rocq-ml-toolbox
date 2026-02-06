@@ -37,6 +37,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("--pidfile", default="rocq-ml-server.pid", help="PID file (with --detached).")
     p.add_argument("--num-pet-server", type=int, default=4)
     p.add_argument("--pet-server-start-port", type=int, default=8765)
+    p.add_argument("--pet-server-cmd", type=str, default="pet-server")
     p.add_argument("--max-ram-per-pet", type=int, default=6000, help="Maximum allowed ram usage in MB per pet-server process.")
     p.add_argument("--redis-url", type=str, default="redis://localhost:6379/0")
     p.add_argument("--app", default=DEFAULT_APP)

@@ -24,6 +24,7 @@ NUM_PET_SERVER = int(os.environ["NUM_PET_SERVER"])
 PET_SERVER_START_PORT = int(os.environ["PET_SERVER_START_PORT"])
 MAX_RAM_PER_PET = int(os.environ["MAX_RAM_PER_PET"])  # MB; 0 disables RAM checks
 REDIS_URL = os.environ["REDIS_URL"]
+PET_CMD = os.environ.get("PET_CMD", "pet-server")
 
 redis_client = redis.Redis.from_url(REDIS_URL)
 
@@ -56,7 +57,7 @@ def start_pet_servers() -> None:
 
     for pet_idx in range(NUM_PET_SERVER):
         port = PET_SERVER_START_PORT + pet_idx
-        p = subprocess.Popen(["pet-server", "-p", str(port)])
+        p = subprocess.Popen([PET_CMD, "-p", str(port)])
         pet_servers[pet_idx] = p
 
     time.sleep(3)
@@ -110,7 +111,7 @@ def restart_single_pet_server(pet_idx: int) -> None:
                 pass
 
     port = PET_SERVER_START_PORT + pet_idx
-    new_p = subprocess.Popen(["pet-server", "-p", str(port)])
+    new_p = subprocess.Popen([PET_CMD, "-p", str(port)])
     pet_servers[pet_idx] = new_p
 
     gen_raw = redis_client.get(generation_key(pet_idx))
