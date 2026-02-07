@@ -11,6 +11,7 @@ from typing import List, Optional
 from pathlib import Path
 import time
 
+from .redis_keys import arbiter_key
 DEFAULT_APP = "rocq_ml_toolbox.inference.server:app"
 DEFAULT_CONFIG = "python:rocq_ml_toolbox.inference.gunicorn_config"
 
@@ -75,7 +76,18 @@ def main(argv: Optional[List[str]] = None) -> None:
         env=env,
         pidfile=args.pidfile + ".arbiter" if args.detached else None,
     )
-    redis_client = redis.Redis.from_url("redis://localhost:6379/0")
+    redis_client = redis.Redis.from_url(args.redis_url)
+    deadline = time.monotonic() + 60
+    arbiter_ready = False
+    while time.monotonic() < deadline:
+        res = redis_client.get(arbiter_key())
+        if res and int(res) == 1:
+            arbiter_ready = True
+            break
+    
+    if not arbiter_ready:
+        raise TimeoutError(f"Arbiter does not respond.")
+
     for pet_idx in range(args.num_pet_server):
         req_id = str(uuid.uuid4())
         reply_channel = f"arbiter:reply:{pet_idx}:{req_id}"
@@ -91,7 +103,6 @@ def main(argv: Optional[List[str]] = None) -> None:
                 continue
             if msg["type"] != "message":
                 continue
-
             resp = json.loads(msg["data"])
             if resp.get("id") == req_id:
                 pet_is_ok = True

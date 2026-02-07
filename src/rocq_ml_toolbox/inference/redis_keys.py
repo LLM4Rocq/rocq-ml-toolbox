@@ -33,6 +33,9 @@ def session_assigned_idx_key() -> str:
 def archived_sessions_key() -> str:
     return "archived_sessions"
 
+def arbiter_key() -> str:
+    return f"arbiter"
+
 ALL_KEYS_STAR = [
     session_key('*'),
     mapping_state_key('*'),
@@ -42,6 +45,7 @@ ALL_KEYS_STAR = [
     pet_lock_key('*'),
     monitor_epoch_key('*'),
     session_assigned_idx_key(),
-    archived_sessions_key()
+    archived_sessions_key(),
+    arbiter_key()
 ]
     

@@ -15,6 +15,7 @@ from .redis_keys import (
     monitor_epoch_key,
     pet_status_key,
     generation_key,
+    arbiter_key,
     pet_lock_key,
     PetStatus,
     ALL_KEYS_STAR,
@@ -213,6 +214,7 @@ def main() -> None:
     kill_all_pet()
     start_pet_servers()
 
+    redis_client.set(arbiter_key(), "1")
     t = threading.Thread(target=monitor_ram, daemon=True)
     t.start()
     monitor_threads.append(t)
