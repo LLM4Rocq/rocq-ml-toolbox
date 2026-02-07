@@ -132,7 +132,7 @@ def monitor_ram(poll_interval=0.1) -> None:
         try:
             for pet_idx in range(NUM_PET_SERVER):
                 p = pet_servers[pet_idx]
-                if MAX_RAM_PER_PET > 0:
+                if p and MAX_RAM_PER_PET > 0:
                     try:
                         proc = psutil.Process(p.pid)
                         rss_mb = proc.memory_info().rss / (1024 * 1024)
@@ -146,12 +146,12 @@ def monitor_ram(poll_interval=0.1) -> None:
                     except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
                         print(f"[arbiter] RAM check failed for pet_idx={pet_idx}: {e}", flush=True)
                 
-                time.sleep(poll_interval)
+            time.sleep(poll_interval)
         except Exception as e:
             print(f"[arbiter] Error in RAM monitor: {e}", flush=True)
             time.sleep(poll_interval)
 
-    print(f"[arbiter] Monitor thread exiting for pet_idx={pet_idx}", flush=True)
+    print(f"[arbiter] Ram Monitor exit", flush=True)
 def monitor_redis_for_restarts(pet_idx: int) -> None:
     """
     Monitor Redis pet_status:{idx} keys for RESTART_NEEDED, detect crashes,
