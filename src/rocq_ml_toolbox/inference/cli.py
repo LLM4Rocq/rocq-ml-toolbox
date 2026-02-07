@@ -4,8 +4,12 @@ import argparse
 import os
 import sys
 import subprocess
+import redis
+import uuid
+import json
 from typing import List, Optional
 from pathlib import Path
+import time
 
 DEFAULT_APP = "rocq_ml_toolbox.inference.server:app"
 DEFAULT_CONFIG = "python:rocq_ml_toolbox.inference.gunicorn_config"
@@ -71,7 +75,36 @@ def main(argv: Optional[List[str]] = None) -> None:
         env=env,
         pidfile=args.pidfile + ".arbiter" if args.detached else None,
     )
+    redis_client = redis.Redis.from_url("redis://localhost:6379/0")
+    for pet_idx in range(args.num_pet_server):
+        req_id = str(uuid.uuid4())
+        reply_channel = f"arbiter:reply:{pet_idx}:{req_id}"
+        ps = redis_client.pubsub(ignore_subscribe_messages=True)
+        ps.subscribe(reply_channel)
+        req = {"id": req_id, "reply_to": reply_channel}
+        redis_client.publish(f"arbiter:req:{pet_idx}", json.dumps(req))
+        deadline = time.monotonic() + 60
+        pet_is_ok = False
+        while time.monotonic() < deadline:
+            msg = ps.get_message(timeout=1.0)
+            if not msg:
+                continue
+            if msg["type"] != "message":
+                continue
 
+            resp = json.loads(msg["data"])
+            if resp.get("id") == req_id:
+                pet_is_ok = True
+            break
+            
+        if not pet_is_ok:
+            try:
+                arbiter_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                arbiter_proc.kill()
+            raise TimeoutError(f"Pet-server at {pet_idx} does not respond.")
+
+    print("Starting uvicorn...")
     if args.detached:
         popen_detached(
             uvicorn_cmd,
