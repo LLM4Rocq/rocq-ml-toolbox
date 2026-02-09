@@ -2,8 +2,9 @@ import os
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request as FastAPIRequest, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 import tempfile
+import json
 
 from pydantic import BaseModel
 from typing import Optional, Any
@@ -86,8 +87,14 @@ def get_ast(body: GetAstBody):
     """
     Extract full AST (verbatim) from document at `path`.
     """
-    output = {"value": load_ast_dump(body.path, root=body.root, force_dump=body.force_dump)}
-    return output
+
+    ast = load_ast_dump(body.path, root=body.root, force_dump=body.force_dump)
+    def gen():
+        yield '{"value":'
+        yield json.dumps(ast)
+        yield '}'
+
+    return StreamingResponse(gen(), media_type="application/json")
 
 @app.post("/get_glob")
 def get_glob(body: GetGlobBody):
