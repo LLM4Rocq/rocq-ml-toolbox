@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple, Generator, Dict, Union
 import re
 import tempfile
 from collections import defaultdict
-
+from pathlib import Path
 from pytanque.protocol import State, Opts
 
 from .utils.ast import list_dependencies
@@ -67,10 +67,7 @@ class RocqParser:
 
     def _extract_loadpath(self, timeout: int=30) -> Dict[str, str]:
         path = self.client.empty_file()
-        try:
-            state = self.client.get_root_state(path)
-        except PetanqueError as e:
-            raise ParserError(f'Issue with temporary file: {path}')
+        state = self.client.get_root_state(path)
         result = self.client.run(state, 'Print LoadPath.', timeout=timeout)
         return parse_loadpath(result.feedback[0][1])
 
@@ -106,8 +103,8 @@ class RocqParser:
                 result[key] = el
         return result
     
-    def ast(self, source: Source, check_hb=True) -> Tuple[List[VernacElement], List[VernacElement]]:
-        ast = self.client.get_ast(source.path)
+    def ast(self, source: Source, root: Optional[Path]=None,check_hb=True) -> Tuple[List[VernacElement], List[VernacElement]]:
+        ast = self.client.get_ast(source.path, root=root)
     
         target_elements = []
         proof_elements = []
