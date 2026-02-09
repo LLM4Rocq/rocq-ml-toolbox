@@ -2,12 +2,11 @@
 
 import os
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import re
 import time
 import signal
 import tempfile
-
 import requests
 
 from .config import OpamConfig
@@ -21,6 +20,7 @@ class OpamDocker(BaseDocker):
         """Start or reuse a container built from the given OPAM configuration."""
         super().__init__(config, kill_clone=kill_clone, rebuild=rebuild)
         if kill_clone: self._kill_clone(redis_image)
+
         self.redis_container = self.client.containers.run(
             redis_image,
             detach=True,
@@ -29,12 +29,28 @@ class OpamDocker(BaseDocker):
         )
         self.opam_env_path = config.opam_env_path
         self.config = config
+        if self.config.user == "coq":
+            cmd = f"""
+            /home/{self.config.user}/miniconda/bin/conda run -n rocq-ml pip install pyyaml
+            """
+            self.exec_cmd(["bash", "-lc", cmd])
+            self.container.commit(self.config.name, self.config.tag)
         if update_rocq_ml:
             self.exec_cmd([
                 "bash",
                 "-lc",
-                "cd ~/rocq-ml-toolbox && git pull"
+                "cd ~/rocq-ml-toolbox && git pull && git switch unified_fastapi"
             ])
+            self.exec_cmd([
+                "bash",
+                "-lc",
+                "cd ~/pytanque-repo && git pull && git switch pytanque_http"
+            ])
+            # cmd = f"""
+            # /home/{self.config.user}/miniconda/bin/conda run -n rocq-ml pip install -U uvicorn fastapi
+            # """
+            # self.exec_cmd(["bash", "-lc", cmd])
+            # self.container.commit(self.config.name, self.config.tag)
 
 
     def install_project(self, project: str, extra_args: str = ""):
@@ -59,6 +75,7 @@ class OpamDocker(BaseDocker):
     
     def _build_image(self, timeout_install=3600):
         """Create a container image for the requested packages if needed."""
+        
         self.container = self.client.containers.run(
             self.config.base_image,
             detach=True,
@@ -66,7 +83,7 @@ class OpamDocker(BaseDocker):
             stdin_open=False,
             user=self.config.user,
             command=["sleep", "infinity"],
-            network_mode="host",
+            network_mode="host"
         )
 
         print('Build Image')
@@ -80,18 +97,17 @@ class OpamDocker(BaseDocker):
 
         self.container.commit(self.config.name, self.config.tag)
 
-    def start_inference_server(self, port=5000, workers=9, timeout=600, num_pet_server=4, pet_server_start_port=8765, max_ram_per_pet=3072):
+    def start_inference_server(self, port=5000, timeout=600, workers=9, num_pet_server=4, pet_server_start_port=8765, max_ram_per_pet=4096):
         """Launch pet-server inside the container."""
         self.pet_port = port
+        pet_server_path = os.path.join(self.config.opam_env_path, 'bin/pet-server')
         cmd = f"""
-        eval "$(/home/{self.config.user}/miniconda/bin/conda shell.bash hook)"
-        conda activate rocq-ml
-        rocq-ml-server -d -p {port} -w {workers} -t {timeout} \
+        /home/{self.config.user}/miniconda/bin/conda run -n rocq-ml rocq-ml-server -p {port} -w {workers} -t {timeout} -d -l \
         --num-pet-server {num_pet_server} \
         --pet-server-start-port {pet_server_start_port} \
-        --max-ram-per-pet {max_ram_per_pet}
+        --max-ram-per-pet {max_ram_per_pet} \
+        --pet-server-cmd {pet_server_path}
         """
-
         self.exec_cmd(["bash", "-lc", cmd])
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -101,7 +117,7 @@ class OpamDocker(BaseDocker):
                     return
             except Exception as e:
                 pass
-            time.sleep(0.1)
+            time.sleep(1)
         log = self.exec_cmd("sh -lc 'tail -n +200 /tmp/gunicorn-error.log || true'")
         raise RuntimeError(f"rocq-ml-server failed to start on port {port}.\n{log}")
 
@@ -111,29 +127,46 @@ class OpamDocker(BaseDocker):
         subfiles = self.exec_cmd(f"ls -1 {user_contrib}").splitlines()
         return subfiles
 
-    def extract_source_files_from_folder(self, folder_name: str) -> List[Source]:
-        """List `.v` files shipped with an installed package."""
-        sources_path = os.path.join(self.opam_env_path, "lib/coq/user-contrib/", folder_name)
+    def extract_files_from_target(self, target: str) -> List[str]:
+        """List all files shipped with an installed package."""
+        sources_path = os.path.join(self.opam_env_path, "lib/coq/user-contrib/", target)
+        subfiles = self.exec_cmd(f"find {sources_path}").splitlines()
+        filepaths = [os.path.join(sources_path, file) for file in subfiles]
+        return filepaths
+
+    def extract_source_files_from_corelib(self) -> List[Source]:
+        sources_path = os.path.join(self.opam_env_path, "lib/coq/theories")
         subfiles = self.exec_cmd(f"find {sources_path}").splitlines()
         filepaths = [os.path.join(sources_path, file) for file in subfiles if file.endswith('.v')]
         return [self.get_source(filepath) for filepath in filepaths]
 
-    def extract_opam_path(self, package_name: str, info_path: Dict[str, str]={}):
-        """Resolve the OPAM installation path for a package."""
-        opam_show = self.exec_cmd(f"opam show {package_name}")
-        match = re.search(r'"logpath:([A-Za-z0-9_.-]+)"', opam_show)
-        if not match:
-            assert package_name in info_path and info_path[package_name], f'Missing info_path for {package_name}'
-            return info_path[package_name], opam_show
-        return match.group(1), opam_show
+    def extract_source_files_from_target(self, target: str) -> List[Source]:
+        """Extract source files shipped with an installed package."""
+        subpaths = self.extract_files_from_target(target)
+        filepaths = [file for file in subpaths if file.endswith('.v')]
+        return [self.get_source(filepath) for filepath in filepaths]
 
-    def extract_source_files_from_package(self, package_name: str, info_path: Dict[str, str]={}) -> Dict[str, Any]:
-        """List `.v` files shipped with an installed package."""
-        fqn, opam_show = self.extract_opam_path(package_name, info_path)
-        user_contrib_path = os.path.join(self.opam_env_path, "lib/coq/user-contrib/")
-        sources_path = os.path.join(user_contrib_path, fqn.replace('.', '/'))
-        subfiles = self.exec_cmd(f"find {sources_path}").splitlines()
-        return {"fqn": fqn, "package_name": package_name, "root": user_contrib_path, "subfiles": [file for file in subfiles if file.endswith('.v')], "opam_show": opam_show}
+    def extract_files_from_package(self, package: str) -> List[str]:
+        """List all files shipped with an installed package."""
+        package_path = os.path.join(self.opam_env_path, ".opam-switch/sources/", package)
+        subfiles = self.exec_cmd(f"find {package_path}").splitlines()
+        filepaths = [os.path.join(package_path, file) for file in subfiles]
+        return filepaths
+
+    def copy_coq_files_from_package_to_target(self, package: str, target: str) -> List[str]:
+        sources_path = os.path.join(self.opam_env_path, "lib/coq/user-contrib/", target)
+        filepaths = self.extract_files_from_package(package)
+        result = []
+        for filepath in filepaths:
+            filepath_p = Path(filepath)
+            if filepath_p.name.startswith('_CoqProject'):
+                coq_proj = filepath_p.name
+                content = self.read_file(filepath)
+
+                path_target = os.path.join(sources_path, coq_proj)
+                self.write_file(path_target, content)
+                result.append(filepath)
+        return result
 
     def get_source(self, filepath: str) -> Source:
         """Return a `Source` dataclass for a file inside the container."""
