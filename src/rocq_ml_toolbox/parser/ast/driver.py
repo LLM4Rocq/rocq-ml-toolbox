@@ -61,7 +61,7 @@ def load_ast_dump(filepath: str | Path, *, root: Optional[str] = None, force_dum
 
 
 def parse_ast_dump(
-    ast_dump: Sequence[dict],
+    ast_dump: List[dict],
     *,
     on_unsupported: str = "keep",  # "keep" | "raise"
     keep_raw: bool = False,
