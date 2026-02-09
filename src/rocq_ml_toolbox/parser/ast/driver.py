@@ -25,23 +25,14 @@ def ast_dump_path(filepath: str | Path) -> Path:
 
 def run_fcc_astdump(filepath: str | Path, *, root: Optional[str]=None, cfg: FccConfig = FccConfig()) -> Path:
     filepath = Path(filepath)
-    with tempfile.TemporaryDirectory(prefix="fcc_ast_") as tmpdir:
-        tmpdir = Path(tmpdir)
 
-        tmp_src = tmpdir / filepath.name
-        shutil.copy(filepath, tmp_src)
+    out = ast_dump_path(filepath)
+    cmd = [cfg.fcc_cmd, f"--root={root}", f"--plugin={cfg.plugin}", str(filepath), "--no_vo"]
+    subprocess.run(cmd, capture_output=True, text=True)
 
-        out = ast_dump_path(tmp_src)
-
-        cmd = [cfg.fcc_cmd, f"--root={root}", f"--plugin={cfg.plugin}", str(tmp_src)]
-        subprocess.run(cmd, capture_output=True, text=True)
-
-        if not out.exists():
-            raise RuntimeError(f"Expected ast dump not found: {out}")
-
-        final_out = ast_dump_path(filepath)
-        shutil.copy(out, final_out)
-    return final_out
+    if not out.exists():
+        raise RuntimeError(f"Expected ast dump not found: {out}")
+    return out
 
 def generate_ast_dump_file(filepath: str | Path, *, force_dump: bool = False, cfg: FccConfig = FccConfig()) -> Path:
     filepath = Path(filepath)
