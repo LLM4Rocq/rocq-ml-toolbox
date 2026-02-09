@@ -84,7 +84,7 @@ class SessionManager:
     def get_generation(self, pet_idx: int) -> int:
         data = self.redis_client.get(generation_key(pet_idx))
         if not data:
-            raise SessionManagerError("Unknown session_id")
+            raise SessionManagerError(f"No generation key related to pet-server at {pet_idx}")
         return int(data)
 
     @log_timing()
