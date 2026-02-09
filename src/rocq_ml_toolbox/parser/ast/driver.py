@@ -5,7 +5,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence, List
+from typing import Iterable, Sequence, List, Optional
 import tempfile
 import shutil
 
@@ -23,7 +23,7 @@ def ast_dump_path(filepath: str | Path) -> Path:
     return p.with_suffix(p.suffix + ".jsonl.astdump")
 
 
-def run_fcc_astdump(filepath: str | Path, *, cfg: FccConfig = FccConfig()) -> Path:
+def run_fcc_astdump(filepath: str | Path, *, root: Optional[str]=None, cfg: FccConfig = FccConfig()) -> Path:
     filepath = Path(filepath)
     with tempfile.TemporaryDirectory(prefix="fcc_ast_") as tmpdir:
         tmpdir = Path(tmpdir)
@@ -33,7 +33,7 @@ def run_fcc_astdump(filepath: str | Path, *, cfg: FccConfig = FccConfig()) -> Pa
 
         out = ast_dump_path(tmp_src)
 
-        cmd = [cfg.fcc_cmd, f"--plugin={cfg.plugin}", str(tmp_src)]
+        cmd = [cfg.fcc_cmd, f"--root={root}", f"--plugin={cfg.plugin}", str(tmp_src)]
         subprocess.run(cmd, capture_output=True, text=True)
 
         if not out.exists():
@@ -52,12 +52,12 @@ def generate_ast_dump_file(filepath: str | Path, *, force_dump: bool = False, cf
 
     return dump
 
-def load_ast_dump(filepath: str | Path, *, force_dump: bool = False, cfg: FccConfig = FccConfig()) -> List[dict]:
+def load_ast_dump(filepath: str | Path, *, root: Optional[str] = None, force_dump: bool = False, cfg: FccConfig = FccConfig()) -> List[dict]:
     filepath = Path(filepath)
     dump = ast_dump_path(filepath)
 
     if force_dump or not dump.exists():
-        run_fcc_astdump(filepath, cfg=cfg)
+        run_fcc_astdump(filepath, root=root, cfg=cfg)
 
     contents: List[dict] = []
     with dump.open("r", encoding="utf-8") as f:

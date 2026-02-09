@@ -75,6 +75,7 @@ def rpc_endpoint(body: JsonRpcBody, request: FastAPIRequest):
 class GetAstBody(BaseModel):
     path: str
     force_dump: bool=False
+    root: Optional[str]=None
 
 class GetGlobBody(BaseModel):
     path: str
@@ -85,7 +86,7 @@ def get_ast(body: GetAstBody):
     """
     Extract full AST (verbatim) from document at `path`.
     """
-    output = {"value": load_ast_dump(body.path, force_dump=body.force_dump)}
+    output = {"value": load_ast_dump(body.path, root=body.root, force_dump=body.force_dump)}
     return output
 
 @app.post("/get_glob")
