@@ -164,7 +164,11 @@ def parse_extend(obj: dict) -> Optional[VernacElement]:
         if name == "VernacSolve":
             return VernacElement(span=span, kind=VernacKind.PROOF_STEP, name=None)
         if name == 'VernacDeclareTacticDefinition':
-            tac_name = jmaybe(obj, "v", "expr", 1, 2, 0, 2, 0, 1, 0, 1, 1, default=None)
+            tac_name = jmaybe(obj, "v", "expr", 1, 2, 0, 2, 0, 1, 0, 1, 1, 1, 0, 1, default=None)
+            if not tac_name:
+                tac_name = jmaybe(obj, "v", "expr", 1, 2, 0, 2, 0, 1, 0, 1, 1)
+                if not isinstance(tac_name, str):
+                    tac_name = None
             return VernacElement(span=span, kind=VernacKind.LTAC, name=tac_name)
     return None
 
