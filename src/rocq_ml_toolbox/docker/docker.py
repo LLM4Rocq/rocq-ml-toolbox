@@ -25,8 +25,8 @@ class BaseDocker(ABC):
         image_name = config.name + ':' + config.tag
         
         if kill_clone: self._kill_clone(image_name)
-        self.container: Container=None
         self._load_container(rebuild=rebuild, timeout_install=timeout_install)
+        self.container: Container
 
     @staticmethod
     def _timeout_handler(signum, frame):
@@ -45,12 +45,12 @@ class BaseDocker(ABC):
         except Exception as e:
             raise RuntimeError(f"Failed to kill clones for image {image_name}: {e}")
     
-    def _load_container(self, rebuild=False, **kwargs) -> Optional[Container]:
+    def _load_container(self, rebuild=False, **kwargs):
         image_name = self.config.name + ':' + self.config.tag
         user = self.config.user
         filterred_images = self.client.images.list(filters={'reference': image_name})
         if not filterred_images or rebuild:
-            return self._build_image(**kwargs)
+            self._build_image(**kwargs)
         
         self.container = self.client.containers.run(
             image_name,
@@ -119,7 +119,7 @@ class BaseDocker(ABC):
         )["Id"]
         return self.client.api.exec_start(exec_id).decode('utf-8')
 
-    def read_file(self, filepath, max_bytes=None, encoding="utf-8") -> str:
+    def read_file(self, filepath: str, max_bytes=None, encoding="utf-8") -> str:
         """Read a file from the container filesystem."""
         api = self.client.api
         cmd = f"sh -lc 'cat -- {shlex.quote(filepath)}'"
@@ -143,15 +143,16 @@ class BaseDocker(ABC):
             raise RuntimeError(f"cat failed with exit code {code}")
         return buf.decode(encoding, errors="replace")
 
-    def kill_container(self, container: Container):
+    def kill_container(self, container: Container, timeout=30):
         try:
             container.kill()
+            container.wait(timeout=timeout)
         finally:
             container.remove(force=True)
 
-    def close(self):
+    def close(self, timeout=30):
         """Stop and remove the underlying containers."""
-        self.kill_container(self.container)
+        self.kill_container(self.container, timeout=timeout)
 
     def write_file(self, path, content: str, create_dir: bool = False, *, encoding: str = "utf-8") -> None:
         """
