@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import re
 import time
 import signal
@@ -12,7 +12,7 @@ import requests
 from .config import OpamConfig
 from .docker import BaseDocker
 from ..parser.parser import Source
-
+from .matches import match_paths
 class OpamDocker(BaseDocker):
     """Wraps Docker interactions for extracting data from an OPAM switch."""
 
@@ -29,12 +29,12 @@ class OpamDocker(BaseDocker):
         )
         self.opam_env_path = config.opam_env_path
         self.config = config
-        if self.config.user == "coq":
-            cmd = f"""
-            /home/{self.config.user}/miniconda/bin/conda run -n rocq-ml pip install pyyaml
-            """
-            self.exec_cmd(["bash", "-lc", cmd])
-            self.container.commit(self.config.name, self.config.tag)
+        # if self.config.user == "coq":
+        #     cmd = f"""
+        #     /home/{self.config.user}/miniconda/bin/conda run -n rocq-ml pip install pyyaml
+        #     """
+        #     self.exec_cmd(["bash", "-lc", cmd])
+        #     self.container.commit(self.config.name, self.config.tag)
         if update_rocq_ml:
             self.exec_cmd([
                 "bash",
@@ -153,6 +153,15 @@ class OpamDocker(BaseDocker):
         filepaths = [os.path.join(package_path, file) for file in subfiles]
         return filepaths
 
+    def _map_vo_v_package_target(self, package: str, target: str) -> Tuple[List[Path], List[Path], List[Path]]:
+        skeleton_vo = self.extract_files_from_target(target)
+        skeleton_v = self.extract_files_from_package(package)
+
+        skeleton_vo_target = [Path(p) for p in skeleton_vo if p.endswith('.vo')]
+        skeleton_v_target = [Path(p) for p in skeleton_vo if p.endswith('.v')]
+        skeleton_v_package = [Path(p) for p in skeleton_v if p.endswith('.v')]
+        return skeleton_vo_target, skeleton_v_target, skeleton_v_package
+    
     def copy_coq_files_from_package_to_target(self, package: str, target: str) -> List[str]:
         sources_path = os.path.join(self.opam_env_path, "lib/coq/user-contrib/", target)
         filepaths = self.extract_files_from_package(package)
@@ -166,6 +175,14 @@ class OpamDocker(BaseDocker):
                 path_target = os.path.join(sources_path, coq_proj)
                 self.write_file(path_target, content)
                 result.append(filepath)
+        
+        vo_paths_target, v_paths_target, v_paths_package = self._map_vo_v_package_target(package, target)
+        mapping, _ = match_paths(vo_paths_target, v_paths_package) 
+        for package_p, target_p in mapping.items():
+            package_target = package_p.with_suffix('.v')
+            if package_target not in v_paths_target:
+                content = self.read_file(target_p)
+                self.write_file(package_target, content)
         return result
 
     def get_source(self, filepath: str) -> Source:
