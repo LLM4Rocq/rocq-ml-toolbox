@@ -19,6 +19,14 @@ class DockerConfig:
             data = yaml.safe_load(f)
         return cls(**data)
 
+    def to_json(self) -> dict:
+        return {
+            "name": self.name,
+            "tag": self.tag,
+            "base_image": self.base_image,
+            "user": self.user
+        }
+
 @dataclass
 class Target:
     lib: str
@@ -47,6 +55,7 @@ class Target:
 class OpamConfig(DockerConfig):
     """Configuration for building an Opam Docker image."""
     opam_env_path: str
+    version: str
     packages: list[str] = field(default_factory=list)
     dependencies: List[str] = field(default_factory=list)
     pins: list[str] = field(default_factory=list)
@@ -59,6 +68,15 @@ class OpamConfig(DockerConfig):
             data = yaml.safe_load(f)
         data['targets'] = [Target.from_json(t) for t in data['targets']]
         return cls(**data)
-
-def solve_deps_config(opam_configs: List[DockerConfig]) -> List[Tuple[DockerConfig, List[Target]]]:
-    pass
+    
+    def to_json(self) -> dict:
+        data = super().to_json()
+        data.update({
+            "opam_env_path": self.opam_env_path,
+            "version": self.version,
+            "packages": self.packages,
+            "dependencies": self.dependencies,
+            "pins": self.pins,
+            "targets": [t.to_json() for t in self.targets],
+        })
+        return data
