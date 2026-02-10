@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 import re
 import shlex
 import sys
@@ -119,8 +119,9 @@ class BaseDocker(ABC):
         )["Id"]
         return self.client.api.exec_start(exec_id).decode('utf-8')
 
-    def read_file(self, filepath: str, max_bytes=None, encoding="utf-8") -> str:
+    def read_file(self, filepath: Union[str, Path], max_bytes=None, encoding="utf-8") -> str:
         """Read a file from the container filesystem."""
+        filepath = str(filepath)
         api = self.client.api
         cmd = f"sh -lc 'cat -- {shlex.quote(filepath)}'"
         exec_id = api.exec_create(self.container.id, cmd,
