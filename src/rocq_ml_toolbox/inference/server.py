@@ -8,7 +8,8 @@ import json
 
 from pydantic import BaseModel
 from typing import Optional, Any
-from pytanque.client import RouteName
+from pytanque.client import RouteName, PetanqueError, Response
+from pytanque.protocol import Failure, Error
 from pytanque.routes import PETANQUE_ROUTES
 from .sessions import SessionManager
 from ..parser.ast.driver import load_ast_dump
@@ -62,14 +63,22 @@ def rpc_endpoint(body: JsonRpcBody, request: FastAPIRequest):
     session_manager: SessionManager = request.app.state.sm
     params_cls = PETANQUE_ROUTES[body.route_name].params_cls
     params_obj = params_cls.from_json(body.params)
-
-    result = session_manager._pet_call(
-        request_id=body.id,
-        session_id=body.session_id,
-        route_name=body.route_name,
-        params=params_obj,
-        timeout=body.timeout,
-    )
+    try:
+        result = session_manager._pet_call(
+            request_id=body.id,
+            session_id=body.session_id,
+            route_name=body.route_name,
+            params=params_obj,
+            timeout=body.timeout,
+        )
+    except PetanqueError as e:
+        result = Failure(
+            body.id,
+            Error(
+                e.code,
+                e.message
+            )
+        )
     # result = dispatch_rpc(registry)
     return result.to_json()
 
