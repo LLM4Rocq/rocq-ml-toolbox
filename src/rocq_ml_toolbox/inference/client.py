@@ -1,7 +1,7 @@
 from pytanque import Pytanque, PytanqueMode
 import requests
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Any, Self
 
 from ..parser.ast.driver import parse_ast_dump, VernacElement
 from ..parser.glob.driver import GlobFile
@@ -26,3 +26,19 @@ class PytanqueExtended(Pytanque):
         result = requests.get(url)
         path = result.json()['path']
         return path
+    
+    def to_json(self) -> Any:
+        return {
+            "host": self.host,
+            "port": self.port,
+            "session_id": self.session_id
+        }
+
+    @classmethod
+    def from_json(cls, x) -> Self:
+        client = cls(
+            x['host'],
+            x['port']
+        )
+        client.session_id = x['session_id']
+        return client
