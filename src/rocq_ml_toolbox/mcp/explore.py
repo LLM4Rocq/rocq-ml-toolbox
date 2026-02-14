@@ -11,7 +11,7 @@ from .navigation import CodebaseNavigator
 
 mcp = FastMCP(name="Rocq Prover MCP")
 
-code_navigator = CodebaseNavigator(Path('annotated/export/theostos'))
+code_navigator = CodebaseNavigator(Path('export/theostos'))
 
 def _extract_env() -> str:
     try:
@@ -31,7 +31,7 @@ class EnvMiddleware(Middleware):
         ctx = context.fastmcp_context
         if ctx is not None:
             env = _extract_env()
-            ctx.set_state("MCP_ENV", env)
+            await ctx.set_state("MCP_ENV", env)
         return await call_next(context)
 
 mcp.add_middleware(EnvMiddleware())
@@ -50,7 +50,7 @@ async def open_file(path: list[str], ctx: Context) -> str:
       - On error: an explanation, including valid children / suggestions where possible.
     """
     global code_navigator
-    mcp_env = ctx.get_state("MCP_ENV")
+    mcp_env = await ctx.get_state("MCP_ENV")
 
     resp = code_navigator.open(mcp_env, path, filename="source_wo_proof.v")
     if resp.get("ok"):
@@ -75,7 +75,7 @@ async def explore_codebase(path: list[str], ctx: Context) -> str:
       2) Call again with a deeper path based on what was returned.
     """
     global code_navigator
-    mcp_env = ctx.get_state("MCP_ENV")
+    mcp_env = await ctx.get_state("MCP_ENV")
 
     resp = code_navigator.explore(mcp_env, path)
     if resp['ok']:

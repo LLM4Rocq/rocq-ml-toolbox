@@ -54,9 +54,9 @@ def build_trie(env_root: Path) -> Node:
             cur = cur.child(part)
 
         try:
-            cur.one_liner = (p / "one_liner.txt").read_text(encoding="utf-8").strip()
             with open(p / "all_elements.json", "r") as file:
                 cur.num_elements = len(json.load(file))
+            cur.one_liner = (p / "one_liner.txt").read_text(encoding="utf-8").strip()
         except Exception:
             cur.one_liner = None
 
@@ -281,5 +281,5 @@ class CodebaseNavigator:
         return {"ok": True, "result": f"Currently at {where}.\n{tree}"}
 
 if __name__ == "__main__":
-    code_nav = CodebaseNavigator(Path('annotated/export/theostos'))
-    print(code_nav.explore('coq-geocoq', ['mathcomp']))
+    code_nav = CodebaseNavigator(Path('export/theostos'))
+    print(code_nav.explore('coq-mathcomp')['result'])
