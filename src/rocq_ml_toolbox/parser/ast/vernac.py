@@ -117,12 +117,16 @@ def parse_reserved_notation(obj: dict) -> VernacElement:
 def parse_fixpoint(obj: dict) -> VernacElement:
     span = extract_span(obj)
     name = ensure_str(jmaybe(obj, "v", "expr", 1, 2, 1, 0, "fname", "v", 1, default=None))
+    if name == 'None':
+        name = ensure_str(jmaybe(obj, "v", "expr", 1, 2, 0, "fname", "v", 1, default=None))
     return VernacElement(span=span, kind=VernacKind.FIXPOINT, name=name)
 
 
 def parse_cofixpoint(obj: dict) -> VernacElement:
     span = extract_span(obj)
-    name = ensure_str(jmaybe(obj, "v", "expr", 1, 2, 0, "fname", "v", 1, default=None))
+    name = ensure_str(jmaybe(obj, "v", "expr", 1, 2, 1, 0, "fname", "v", 1, default=None))
+    if name == 'None':
+        name = ensure_str(jmaybe(obj, "v", "expr", 1, 2, 0, "fname", "v", 1, default=None))
     return VernacElement(span=span, kind=VernacKind.COFIXPOINT, name=name)
 
 
