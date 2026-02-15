@@ -144,6 +144,10 @@ class BaseDocker(ABC):
             raise RuntimeError(f"cat failed with exit code {code}")
         return buf.decode(encoding, errors="replace")
 
+    def cp(self, source: Union[str, Path], target: Union[str, Path]):
+        cmd = f"sh -lc 'cp -r {shlex.quote(source)} {shlex.quote(target)}'"
+        self.exec_cmd(cmd)
+    
     def kill_container(self, container: Container, timeout=30):
         try:
             container.kill()
