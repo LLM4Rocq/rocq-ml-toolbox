@@ -7,6 +7,8 @@ import signal
 import threading
 import subprocess
 from typing import List, Optional
+from setproctitle import setproctitle
+setproctitle("rocq-ml-arbiter")
 
 import psutil
 import redis
@@ -54,13 +56,13 @@ def kill_all_pet(proc_name: str = "pet-server") -> None:
 
 def start_pet_servers() -> None:
     """Spawn one pet-server process per pet_idx on fixed ports."""
-    global pet_servers
-
     for pet_idx in range(NUM_PET_SERVER):
         port = PET_SERVER_START_PORT + pet_idx
-        p = subprocess.Popen([PET_CMD, "-p", str(port)])
+        p = subprocess.Popen(
+            [PET_CMD, "-p", str(port)],
+            start_new_session=True,  # new process group/session
+        )
         pet_servers[pet_idx] = p
-
     time.sleep(3)
     for pet_idx in range(NUM_PET_SERVER):
         redis_client.set(pet_status_key(pet_idx), PetStatus.OK)
@@ -74,23 +76,21 @@ def start_pet_servers() -> None:
 
 
 def stop_pet_servers() -> None:
-    """Terminate all currently tracked pet-servers."""
     global pet_servers
     for pet_idx, p in enumerate(pet_servers):
         if p is None:
             continue
         try:
-            p.terminate()
+            os.killpg(p.pid, signal.SIGTERM)   # kill whole group
             p.wait(timeout=2)
         except Exception:
             try:
-                p.kill()
+                os.killpg(p.pid, signal.SIGKILL)
                 p.wait(timeout=2)
             except Exception:
                 pass
         pet_servers[pet_idx] = None
         redis_client.set(pet_status_key(pet_idx), "DOWN")
-
     print("[arbiter] Stopped all pet-servers", flush=True)
 
 
