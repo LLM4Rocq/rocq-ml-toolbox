@@ -7,6 +7,7 @@ import subprocess
 import redis
 import uuid
 import json
+import socket
 from typing import List, Optional
 from pathlib import Path
 import time
@@ -15,21 +16,43 @@ from .redis_keys import arbiter_key
 DEFAULT_APP = "rocq_ml_toolbox.inference.server:app"
 DEFAULT_CONFIG = "python:rocq_ml_toolbox.inference.gunicorn_config"
 
-def popen_detached(cmd, env, pidfile: str | None = None):
-    with open(os.devnull, "rb") as devnull_in, open(os.devnull, "wb") as devnull_out:
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdin=devnull_in,
-            stdout=devnull_out,
-            stderr=devnull_out,
-            start_new_session=True
-        )
+
+def popen_detached(cmd, env, pidfile: str | None = None, *, stdout_path=None, stderr_path=None):
+    stdout_f = open(stdout_path, "ab") if stdout_path else open(os.devnull, "wb")
+    stderr_f = open(stderr_path, "ab") if stderr_path else open(os.devnull, "wb")
+    devnull_in = open(os.devnull, "rb")
+
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        stdin=devnull_in,
+        stdout=stdout_f,
+        stderr=stderr_f,
+        start_new_session=True,
+    )
 
     if pidfile:
         Path(pidfile).write_text(str(proc.pid))
 
     return proc
+
+def tail(path: str, n: int = 80) -> str:
+    try:
+        lines = Path(path).read_text(errors="replace").splitlines()
+        return "\n".join(lines[-n:])
+    except FileNotFoundError:
+        return "<no log file>"
+
+def is_port_available(port: int, host: str = "0.0.0.0") -> bool:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 def main(argv: Optional[List[str]] = None) -> None:
     p = argparse.ArgumentParser(prog="rocq-ml-server")
@@ -40,6 +63,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("-t", "--timeout", type=int, default=600)
     p.add_argument("-l", "--log", action="store_true", default=False)
     p.add_argument("--pidfile", default="rocq-ml-server.pid", help="PID file (with --detached).")
+    p.add_argument("--arbiter-log", default="arbiter.log", help="arbiter log file.")
     p.add_argument("--num-pet-server", type=int, default=4)
     p.add_argument("--pet-server-start-port", type=int, default=8765)
     p.add_argument("--pet-server-cmd", type=str, default="pet-server")
@@ -70,13 +94,29 @@ def main(argv: Optional[List[str]] = None) -> None:
     env["REDIS_URL"] = str(args.redis_url)
     env["PET_CMD"] = str(args.pet_server_cmd)    
     
+    first_pet_port = args.pet_server_start_port
+    all_required_ports = list(range(first_pet_port, first_pet_port+ args.num_pet_server))
+    all_required_ports.append(args.port)
+
+    for port in all_required_ports:
+        if not is_port_available(port):
+            raise OSError(f"Required port {port} is already in use on localhost.")
+    
     print("Starting arbiter...")
+    try:
+        redis_client = redis.Redis.from_url(args.redis_url)
+        redis_client.set(arbiter_key(), "0")
+    except redis.ConnectionError:
+        raise Exception(f'Redis is not available at {args.redis_url}')
+    
+    arbiter_log = args.arbiter_log
     arbiter_proc = popen_detached(
         arbiter_cmd,
         env=env,
         pidfile=args.pidfile + ".arbiter" if args.detached else None,
+        stdout_path=arbiter_log,
+        stderr_path=arbiter_log,
     )
-    redis_client = redis.Redis.from_url(args.redis_url)
     deadline = time.monotonic() + 60
     arbiter_ready = False
     while time.monotonic() < deadline:
@@ -113,7 +153,12 @@ def main(argv: Optional[List[str]] = None) -> None:
                 arbiter_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 arbiter_proc.kill()
-            raise TimeoutError(f"Pet-server at {pet_idx} does not respond.")
+
+            raise TimeoutError(
+                f"Pet-server at {pet_idx} does not respond.\n"
+                f"Arbiter return code: {arbiter_proc.poll()}\n"
+                f"Arbiter log tail:\n{tail(arbiter_log)}"
+            )
 
     print("Starting uvicorn...")
     if args.detached:

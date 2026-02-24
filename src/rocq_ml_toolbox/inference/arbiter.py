@@ -210,11 +210,10 @@ def main() -> None:
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
+    redis_client.set(arbiter_key(), "0")
     clean_redis_all()
     kill_all_pet()
     start_pet_servers()
-
-    redis_client.set(arbiter_key(), "1")
     t = threading.Thread(target=monitor_ram, daemon=True)
     t.start()
     monitor_threads.append(t)
@@ -226,7 +225,8 @@ def main() -> None:
         monitor_threads.append(t)
 
     print("[arbiter] Running.", flush=True)
-
+    time.sleep(5)
+    redis_client.set(arbiter_key(), "1")
     # Keep process alive until signal
     try:
         while not _stop_event.is_set():
