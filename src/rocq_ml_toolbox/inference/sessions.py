@@ -8,7 +8,7 @@ import logging
 import json
 import uuid
 
-
+import redis.exceptions
 from pytanque import Pytanque, PetanqueError, PytanqueMode, Response
 from pytanque.routes import Params, PETANQUE_ROUTES, UniversalRoute, BaseRoute, SessionRoute, InitialSessionRoute, Routes, Responses, RouteName
 
@@ -206,9 +206,7 @@ class SessionManager:
         Update mapping_state_cache if the state is both outdated and not in it.
         """
         current_generation = self.get_generation(session.pet_idx)
-        if state.generation == current_generation:
-            return mapping_state
-        
+
         # check if session is in mappings_state_cache
         if session.id not in self.mappings_state_cache:
             mapping_state = MappingState.from_redis(session, self.redis_client)
@@ -262,7 +260,7 @@ class SessionManager:
         return params_tree_cache
 
     @log_timing()
-    def update_state(self, state: State, route: Routes, session: Session, lock:Lock, timeout_run=60, timeout_get_state=120) -> State:
+    def update_state(self, state: State, session: Session, lock:Lock, timeout_run=60, timeout_get_state=120) -> State:
         """If state.generation is outdated, replay the tactics to recreate cache states on current pet-server."""
         current_generation = self.get_generation(session.pet_idx)
         if state.generation == current_generation:
@@ -285,12 +283,11 @@ class SessionManager:
                 
             # if state is outdated or None then regenerate it
             if not state or state.generation < current_generation:
-                query_kwargs = node.query_kwargs.from_json(node.query_kwargs.to_json())
-                query_kwargs.params = self._update_params(query_kwargs.params, route, session, lock)
-
+                query_kwargs = node.query_kwargs.from_json(node.query_kwargs.to_json())               
+                query_kwargs.params = self._update_params(query_kwargs.params, session, lock)
                 query_res = worker.query(**vars(query_kwargs))
-                route = require_session_route(route)
 
+                route = PETANQUE_ROUTES[query_kwargs.route_name]
                 state = route.extract_response(query_res)
                 state.generation = current_generation
                 mapping_state.add(node.state_key, state)
@@ -306,7 +303,6 @@ class SessionManager:
     def _update_params(
             self,
             params: Params,
-            route: Routes,
             session: Session,
             lock: Lock
     ):
@@ -314,7 +310,7 @@ class SessionManager:
         for field in fields(new_params):
             state = getattr(new_params, field.name)
             if isinstance(state, State):
-                new_state = self.update_state(state, route, session, lock)
+                new_state = self.update_state(state, session, lock)
                 setattr(new_params, field.name, new_state)
         return new_params
 
@@ -334,7 +330,7 @@ class SessionManager:
             # in rare cases pet server may have crashed between the first `from_redis`, and the Lock acquire
             session = Session.from_redis(session_id, self.redis_client)
             worker = self._get_worker(session.pet_idx)
-            updated_params = self._update_params(params, route, session, lock)
+            updated_params = self._update_params(params, session, lock)
             yield session, worker, lock, updated_params
 
         except PetanqueError as e:
