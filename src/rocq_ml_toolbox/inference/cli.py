@@ -11,6 +11,8 @@ import socket
 from typing import List, Optional
 from pathlib import Path
 import time
+from setproctitle import setproctitle
+setproctitle("rocq-ml-server")
 
 from .redis_keys import arbiter_key
 DEFAULT_APP = "rocq_ml_toolbox.inference.server:app"
