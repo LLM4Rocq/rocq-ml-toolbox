@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request as FastAPIRequest, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse
 import tempfile
 import json
+import logging
 
 from pydantic import BaseModel
 from typing import Optional, Any
@@ -14,6 +15,8 @@ from pytanque.routes import PETANQUE_ROUTES
 from .sessions import SessionManager
 from ..parser.ast.driver import load_ast_dump
 from ..parser.glob.driver import load_glob_file
+
+logger = logging.getLogger("session")
 
 class JsonRpcBody(BaseModel):
     jsonrpc: str = "2.0"
@@ -72,6 +75,7 @@ def rpc_endpoint(body: JsonRpcBody, request: FastAPIRequest):
             timeout=body.timeout,
         )
     except PetanqueError as e:
+        logging.error(f"[{body.session_id}] Petanque error {e.code}: {e.message}")
         result = Failure(
             body.id,
             Error(
