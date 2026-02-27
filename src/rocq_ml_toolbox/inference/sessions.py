@@ -259,8 +259,12 @@ class SessionManager:
             raise PetanqueError(-1, "State not found in updated params_tree_cache")
         return params_tree_cache
 
+    @staticmethod
+    def _extend_lock_infinity(lock: Lock):
+        lock.extend(3600*24*30*12*100, replace_ttl=True) # infinity ~= 100 years
+
     @log_timing()
-    def update_state(self, state: State, session: Session, lock:Lock, timeout_run=60, timeout_get_state=120) -> State:
+    def update_state(self, state: State, session: Session, lock:Lock) -> State:
         """If state.generation is outdated, replay the tactics to recreate cache states on current pet-server."""
         current_generation = self.get_generation(session.pet_idx)
         if state.generation == current_generation:
@@ -274,7 +278,7 @@ class SessionManager:
                 return state_map
         
         params_tree = self.params_tree_cache_update(state, session)
-        lock.extend(timeout_get_state+self.timeout_eps, replace_ttl=True)
+        lock.extend(self.timeout_eps, replace_ttl=False)
         replay_session = params_tree.find_path(state)
         logging.info(f"[{session.id}] State inconsistency, replay mechanism ON.")
         for node in replay_session:
@@ -285,6 +289,10 @@ class SessionManager:
             if not state or state.generation < current_generation:
                 query_kwargs = node.query_kwargs.from_json(node.query_kwargs.to_json())               
                 query_kwargs.params = self._update_params(query_kwargs.params, session, lock)
+                if query_kwargs.timeout:
+                    lock.extend(query_kwargs.timeout, replace_ttl=True)
+                else:
+                    SessionManager._extend_lock_infinity(lock)
                 query_res = worker.query(**vars(query_kwargs))
 
                 route = PETANQUE_ROUTES[query_kwargs.route_name]
@@ -440,8 +448,12 @@ class SessionManager:
         route = PETANQUE_ROUTES[route_name]
         with self._pet_ctx(session_id, route, params=params) as (session, worker, lock, updated_params):
             logging.info(f"[{session.id}] {route_name}: {params}")
-            ttl = (timeout or self.timeout_ok) + self.timeout_eps
-            lock.extend(ttl, replace_ttl=True)
+
+            if not timeout:
+                SessionManager._extend_lock_infinity(lock)
+            else:
+                ttl = timeout + self.timeout_eps
+                lock.extend(ttl, replace_ttl=True)
             logging.info(f"[{session.id}] {updated_params}")
             query_res = worker.query(route_name, updated_params, timeout=timeout)
             logging.info(f"[{session.id}] {query_res}")
