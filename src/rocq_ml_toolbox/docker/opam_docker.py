@@ -46,10 +46,10 @@ class OpamDocker(BaseDocker):
                 "-lc",
                 "cd ~/pytanque-repo && git pull && git switch pytanque_http"
             ])
-            # cmd = f"""
-            # /home/{self.config.user}/miniconda/bin/conda run -n rocq-ml pip install -U uvicorn fastapi
-            # """
-            # self.exec_cmd(["bash", "-lc", cmd])
+            cmd = f"""
+            /home/{self.config.user}/miniconda/bin/conda run -n rocq-ml pip install setproctitle
+            """
+            self.exec_cmd(["bash", "-lc", cmd])
             # self.container.commit(self.config.name, self.config.tag)
 
 
@@ -136,9 +136,15 @@ class OpamDocker(BaseDocker):
 
     def extract_source_files_from_corelib(self) -> List[Source]:
         sources_path = os.path.join(self.opam_env_path, "lib/coq/theories")
-        subfiles = self.exec_cmd(f"find {sources_path}").splitlines()
-        filepaths = [os.path.join(sources_path, file) for file in subfiles if file.endswith('.v')]
-        return [self.get_source(filepath) for filepath in filepaths]
+        target_path = os.path.join(self.opam_env_path, "lib/coq/user-contrib/", "Corelib_copy")
+        self.cp(sources_path, target_path)
+
+        # path_target = os.path.join(target_path, '_CoqProject')
+        # content = f'-R . C'
+        # self.write_file(path_target, content)
+
+        subfiles = self.exec_cmd(f"find {target_path}").splitlines()
+        return [self.get_source(filepath) for filepath in subfiles if filepath.endswith('.v')]
 
     def extract_source_files_from_target(self, target: str) -> List[Source]:
         """Extract source files shipped with an installed package."""
@@ -162,29 +168,14 @@ class OpamDocker(BaseDocker):
         skeleton_v_package = [Path(p) for p in skeleton_v if p.endswith('.v')]
         return skeleton_vo_target, skeleton_v_target, skeleton_v_package
     
-    def copy_coq_files_from_package_to_target(self, package: str, target: str) -> List[str]:
+    def add_coqproject(self, target: str, extra_coq_proj_args: List[str]=[]):
         sources_path = os.path.join(self.opam_env_path, "lib/coq/user-contrib/", target)
-        filepaths = self.extract_files_from_package(package)
-        result = []
-        found_coq_proj = False
-        for filepath in filepaths:
-            filepath_p = Path(filepath)
-            if filepath_p.name.startswith('_CoqProject'):
-
-                found_coq_proj = True
-                coq_proj = filepath_p.name
-                content = self.read_file(filepath)
-
-                path_target = os.path.join(sources_path, coq_proj)
-                self.write_file(path_target, content)
-                result.append(filepath)
-        
-        if not found_coq_proj:
-            # Add a default _CoqProject (maybe useful for some projects such as coq-compcert)
-            path_target = os.path.join(sources_path, '_CoqProject')
-            content = f'-R . {target}'
-            self.write_file(path_target, content)
-
+        path_target = os.path.join(sources_path, '_CoqProject')
+        content = f'-R . {target}\n'
+        content += '\n'.join(extra_coq_proj_args)
+        self.write_file(path_target, content)
+    
+    def copy_coq_files_from_package_to_target(self, package: str, target: str, extra_coq_proj_args: List[str]=[]):
         vo_paths_target, v_paths_target, v_paths_package = self._map_vo_v_package_target(package, target)
         mapping, _ = match_paths(vo_paths_target, v_paths_package) 
         for package_p, target_p in mapping.items():
@@ -192,7 +183,6 @@ class OpamDocker(BaseDocker):
             if package_target not in v_paths_target:
                 content = self.read_file(target_p)
                 self.write_file(package_target, content)
-        return result
 
     def get_source(self, filepath: str) -> Source:
         """Return a `Source` dataclass for a file inside the container."""
