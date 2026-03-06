@@ -31,7 +31,7 @@ class DockerConfig:
 class Target:
     lib: str
     packages: List[str]
-
+    extra_coq_proj_args: List[str] = field(default_factory=list)
     @classmethod
     def from_json(cls, x: dict) -> Target:
         return cls(**x)
@@ -39,7 +39,8 @@ class Target:
     def to_json(self) -> dict:
         return {
             "lib": self.lib,
-            "packages": self.packages
+            "packages": self.packages,
+            "extra_coq_proj_args": self.extra_coq_proj_args
         }
 
     def is_inside(self, other_target: Target) -> bool:
