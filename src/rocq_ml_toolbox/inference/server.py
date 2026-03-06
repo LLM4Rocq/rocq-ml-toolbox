@@ -100,7 +100,7 @@ def get_ast(body: GetAstBody):
     """
     Extract full AST (verbatim) from document at `path`.
     """
-
+    logging.info(f"get_ast: {body.path}")
     ast, diags = load_ast_dump(body.path, root=body.root, force_dump=body.force_dump)
     def gen():
         yield '{"value":'
@@ -116,6 +116,7 @@ def get_glob(body: GetGlobBody):
     """
     Extract full AST (verbatim) from document at `path`.
     """
+    logging.info(f"get_glob: {body.path}")
     output = {"value": load_glob_file(body.path, force_compile=body.force_compile)}
     return output
 

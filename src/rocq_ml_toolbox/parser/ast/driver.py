@@ -24,7 +24,7 @@ def ast_dump_path(filepath: str | Path) -> Path:
 
 def diags_dump_path(filepath: str | Path) -> Path:
     p = Path(filepath)
-    return p.with_suffix(p.suffix + ".diags")
+    return p.with_suffix(".diags")
 
 def run_fcc_astdump(filepath: str | Path, *, root: Optional[str]=None, cfg: FccConfig = FccConfig()) -> Tuple[Path, Path]:
     filepath = Path(filepath)
@@ -66,10 +66,7 @@ def load_ast_dump(filepath: str | Path, *, root: Optional[str] = None, force_dum
             if not line:
                 continue
             contents.append(json.loads(line))
-    
-    with diags.open("r", encoding="utf-8") as f:
-        diags_content = f.read()
-    return contents, parse_diagnostics_file(diags_content)
+    return contents, parse_diagnostics_file(diags)
 
 
 def parse_ast_dump(

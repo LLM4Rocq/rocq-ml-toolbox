@@ -11,7 +11,9 @@ class PytanqueExtended(Pytanque):
 
     def get_ast(self, path: Union[Path, str], root: Optional[Union[Path, str]]=None, force_dump: bool=False) -> List[VernacElement]:
         url = f"http://{self.host}:{self.port}/get_ast"
-        result = requests.post(url, json={"path": str(path), "root": str(root), "force_dump": force_dump})
+        if root:
+            root = str(root)
+        result = requests.post(url, json={"path": str(path), "root": root, "force_dump": force_dump})
         raw_ast = result.json()['value']
         return parse_ast_dump(raw_ast)
     
