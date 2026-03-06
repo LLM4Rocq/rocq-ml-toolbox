@@ -3,19 +3,22 @@ import requests
 from pathlib import Path
 from typing import List, Optional, Union, Any, Self
 
+from ..parser.diags.parser import Diagnostic
 from ..parser.ast.driver import parse_ast_dump, VernacElement
 from ..parser.glob.driver import GlobFile
+
 class PytanqueExtended(Pytanque):
     def __init__(self, host: str, port: int):
         super().__init__(host=host, port=port, mode=PytanqueMode.HTTP)
 
-    def get_ast(self, path: Union[Path, str], root: Optional[Union[Path, str]]=None, force_dump: bool=False) -> List[VernacElement]:
+    def get_ast(self, path: Union[Path, str], root: Optional[Union[Path, str]]=None, force_dump: bool=False) -> Tuple[List[VernacElement], List[Diagnostic]]:
         url = f"http://{self.host}:{self.port}/get_ast"
         if root:
             root = str(root)
-        result = requests.post(url, json={"path": str(path), "root": root, "force_dump": force_dump})
-        raw_ast = result.json()['value']
-        return parse_ast_dump(raw_ast)
+        result = requests.post(url, json={"path": str(path), "root": root, "force_dump": force_dump}).json()
+        raw_ast = result['value']
+        diags = result['diags']
+        return parse_ast_dump(raw_ast), [Diagnostic.from_json(d) for d in diags]
     
     def get_glob(self, path: Union[Path, str], force_compile:bool=False) -> GlobFile:
         url = f"http://{self.host}:{self.port}/get_glob"

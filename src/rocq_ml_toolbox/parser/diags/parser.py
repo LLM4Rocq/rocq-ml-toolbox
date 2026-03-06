@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
+from typing import Any, Mapping
 
 class DiagnosticParseError(ValueError):
     """Base class for all diagnostic parsing errors."""
@@ -17,28 +16,107 @@ class DiagnosticJSONError(DiagnosticParseError):
 class DiagnosticValidationError(DiagnosticParseError):
     """Raised when JSON is valid but does not match the expected schema."""
 
+class DiagnosticFormatError(ValueError):
+    """Raised when a JSON object does not match the expected diagnostic schema."""
+
+
+def _type_name(value: Any) -> str:
+    return type(value).__name__
+
+def _require_mapping(value: Any, path: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise DiagnosticFormatError(
+            f"Field '{path}' must be an object, got {_type_name(value)}."
+        )
+    return value
+
+
+def _require_int(value: Any, path: str) -> int:
+    if type(value) is not int:
+        raise DiagnosticFormatError(
+            f"Field '{path}' must be an integer, got {_type_name(value)}."
+        )
+    return value
+
+
+def _require_non_negative_int(value: Any, path: str) -> int:
+    value = _require_int(value, path)
+    if value < 0:
+        raise DiagnosticFormatError(
+            f"Field '{path}' must be >= 0, got {value}."
+        )
+    return value
+
+
+def _require_str(value: Any, path: str) -> str:
+    if not isinstance(value, str):
+        raise DiagnosticFormatError(
+            f"Field '{path}' must be a string, got {_type_name(value)}."
+        )
+    return value
+
+def _require_field(data: Mapping[str, Any], key: str, path: str) -> Any:
+    if key not in data:
+        raise DiagnosticFormatError(f"Missing required field '{path}.{key}'.")
+    return data[key]
+
 
 @dataclass(frozen=True, slots=True)
 class Position:
     line: int
     character: int
 
-    def to_json(self):
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> Position:
+        data = _require_mapping(data, "position")
+
+        return cls(
+            line=_require_non_negative_int(
+                _require_field(data, "line", "position"),
+                "position.line",
+            ),
+            character=_require_non_negative_int(
+                _require_field(data, "character", "position"),
+                "position.character",
+            ),
+        )
+
+    def to_json(self) -> dict[str, int]:
         return {
             "line": self.line,
-            "character": self.character
+            "character": self.character,
         }
+
 
 @dataclass(frozen=True, slots=True)
 class Range:
     start: Position
     end: Position
 
-    def to_json(self):
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> Range:
+        data = _require_mapping(data, "range")
+
+        start = Position.from_json(
+            _require_mapping(_require_field(data, "start", "range"), "range.start")
+        )
+        end = Position.from_json(
+            _require_mapping(_require_field(data, "end", "range"), "range.end")
+        )
+
+        if (end.line, end.character) < (start.line, start.character):
+            raise DiagnosticFormatError(
+                "Field 'range.end' must not be before 'range.start'."
+            )
+
+        return cls(start=start, end=end)
+
+    def to_json(self) -> dict[str, dict[str, int]]:
         return {
             "start": self.start.to_json(),
-            "end": self.end.to_json()
+            "end": self.end.to_json(),
         }
+
 
 @dataclass(frozen=True, slots=True)
 class Diagnostic:
@@ -46,11 +124,29 @@ class Diagnostic:
     severity: int
     message: str
 
-    def to_json(self):
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> Diagnostic:
+        data = _require_mapping(data, "diagnostic")
+
+        return cls(
+            range=Range.from_json(
+                _require_mapping(_require_field(data, "range", "diagnostic"), "diagnostic.range")
+            ),
+            severity=_require_int(
+                _require_field(data, "severity", "diagnostic"),
+                "diagnostic.severity",
+            ),
+            message=_require_str(
+                _require_field(data, "message", "diagnostic"),
+                "diagnostic.message",
+            ),
+        )
+
+    def to_json(self) -> dict[str, Any]:
         return {
             "range": self.range.to_json(),
             "severity": self.severity,
-            "message": self.message
+            "message": self.message,
         }
 
 
@@ -118,98 +214,18 @@ def parse_diagnostics_file(path: str | Path, encoding: str = "utf-8") -> list[Di
 
 
 def _build_diagnostic(obj: Any, diagnostic_number: int) -> Diagnostic:
-    if not isinstance(obj, dict):
+    try:
+        return Diagnostic.from_json(obj)
+    except DiagnosticFormatError as exc:
         raise DiagnosticValidationError(
-            f"Invalid diagnostic #{diagnostic_number}: expected a JSON object at the top level, "
-            f"got {_type_name(obj)}."
-        )
-
-    range_obj = _require_dict(obj, "range", diagnostic_number, path="diagnostic")
-    start_obj = _require_dict(range_obj, "start", diagnostic_number, path="diagnostic.range")
-    end_obj = _require_dict(range_obj, "end", diagnostic_number, path="diagnostic.range")
-
-    start = Position(
-        line=_require_non_negative_int(start_obj, "line", diagnostic_number, path="diagnostic.range.start"),
-        character=_require_non_negative_int(start_obj, "character", diagnostic_number, path="diagnostic.range.start"),
-    )
-
-    end = Position(
-        line=_require_non_negative_int(end_obj, "line", diagnostic_number, path="diagnostic.range.end"),
-        character=_require_non_negative_int(end_obj, "character", diagnostic_number, path="diagnostic.range.end"),
-    )
-
-    if (end.line, end.character) < (start.line, start.character):
-        raise DiagnosticValidationError(
-            f"Invalid diagnostic #{diagnostic_number}: 'range.end' must not be before 'range.start'."
-        )
-
-    severity = _require_int(obj, "severity", diagnostic_number, path="diagnostic")
-    message = _require_str(obj, "message", diagnostic_number, path="diagnostic")
-
-    return Diagnostic(
-        range=Range(start=start, end=end),
-        severity=severity,
-        message=message,
-    )
-
-
-def _require_dict(mapping: dict[str, Any], key: str, diagnostic_number: int, *, path: str) -> dict[str, Any]:
-    value = _require_key(mapping, key, diagnostic_number, path=path)
-    if not isinstance(value, dict):
-        raise DiagnosticValidationError(
-            f"Invalid diagnostic #{diagnostic_number}: field '{path}.{key}' must be an object, "
-            f"got {_type_name(value)}."
-        )
-    return value
-
-
-def _require_int(mapping: dict[str, Any], key: str, diagnostic_number: int, *, path: str) -> int:
-    value = _require_key(mapping, key, diagnostic_number, path=path)
-    if type(value) is not int:
-        raise DiagnosticValidationError(
-            f"Invalid diagnostic #{diagnostic_number}: field '{path}.{key}' must be an integer, "
-            f"got {_type_name(value)}."
-        )
-    return value
-
-
-def _require_non_negative_int(
-    mapping: dict[str, Any], key: str, diagnostic_number: int, *, path: str
-) -> int:
-    value = _require_int(mapping, key, diagnostic_number, path=path)
-    if value < 0:
-        raise DiagnosticValidationError(
-            f"Invalid diagnostic #{diagnostic_number}: field '{path}.{key}' must be >= 0, got {value}."
-        )
-    return value
-
-
-def _require_str(mapping: dict[str, Any], key: str, diagnostic_number: int, *, path: str) -> str:
-    value = _require_key(mapping, key, diagnostic_number, path=path)
-    if not isinstance(value, str):
-        raise DiagnosticValidationError(
-            f"Invalid diagnostic #{diagnostic_number}: field '{path}.{key}' must be a string, "
-            f"got {_type_name(value)}."
-        )
-    return value
-
-
-def _require_key(mapping: dict[str, Any], key: str, diagnostic_number: int, *, path: str) -> Any:
-    if key not in mapping:
-        raise DiagnosticValidationError(
-            f"Invalid diagnostic #{diagnostic_number}: missing required field '{path}.{key}'."
-        )
-    return mapping[key]
+            f"Invalid diagnostic #{diagnostic_number}: {exc}"
+        ) from exc
 
 
 def _skip_whitespace(text: str, index: int) -> int:
     while index < len(text) and text[index].isspace():
         index += 1
     return index
-
-
-def _type_name(value: Any) -> str:
-    return type(value).__name__
 
 
 def _format_json_error(text: str, exc: json.JSONDecodeError, diagnostic_number: int) -> str:
