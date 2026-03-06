@@ -101,10 +101,12 @@ def get_ast(body: GetAstBody):
     Extract full AST (verbatim) from document at `path`.
     """
 
-    ast = load_ast_dump(body.path, root=body.root, force_dump=body.force_dump)
+    ast, diags = load_ast_dump(body.path, root=body.root, force_dump=body.force_dump)
     def gen():
         yield '{"value":'
         yield json.dumps(ast)
+        yield ', "diags":'
+        yield json.dumps([d.to_json() for d in diags])
         yield '}'
 
     return StreamingResponse(gen(), media_type="application/json")
