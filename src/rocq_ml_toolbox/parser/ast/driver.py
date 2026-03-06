@@ -27,19 +27,22 @@ def run_fcc_astdump(filepath: str | Path, *, root: Optional[str]=None, cfg: FccC
     filepath = Path(filepath)
 
     out = ast_dump_path(filepath)
-    cmd = [cfg.fcc_cmd, f"--root={root}", f"--plugin={cfg.plugin}", str(filepath), "--no_vo"]
+    cmd = [cfg.fcc_cmd]
+    if root:
+        cmd.append(f"--root={root}")
+    cmd.extend([f"--plugin={cfg.plugin}", str(filepath), "--no_vo"])
     subprocess.run(cmd, capture_output=True, text=True)
 
     if not out.exists():
         raise RuntimeError(f"Expected ast dump not found: {out}")
     return out
 
-def generate_ast_dump_file(filepath: str | Path, *, force_dump: bool = False, cfg: FccConfig = FccConfig()) -> Path:
+def generate_ast_dump_file(filepath: str | Path, *, root: Optional[str]=None, force_dump: bool = False, cfg: FccConfig = FccConfig()) -> Path:
     filepath = Path(filepath)
     dump = ast_dump_path(filepath)
 
     if force_dump or not dump.exists():
-        run_fcc_astdump(filepath, cfg=cfg)
+        run_fcc_astdump(filepath, root=root, cfg=cfg)
 
     return dump
 
