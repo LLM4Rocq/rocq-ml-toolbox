@@ -26,7 +26,7 @@ def diags_dump_path(filepath: str | Path) -> Path:
     p = Path(filepath)
     return p.with_suffix(".diags")
 
-def run_fcc_astdump(filepath: str | Path, *, root: Optional[str]=None, cfg: FccConfig = FccConfig()) -> Tuple[Path, Path]:
+def run_fcc_astdump(filepath: str | Path, *, root: Optional[str]=None, cfg: FccConfig = FccConfig(), max_errors=10_000) -> Tuple[Path, Path]:
     filepath = Path(filepath)
 
     out = ast_dump_path(filepath)
@@ -34,7 +34,7 @@ def run_fcc_astdump(filepath: str | Path, *, root: Optional[str]=None, cfg: FccC
     cmd = [cfg.fcc_cmd]
     if root:
         cmd.append(f"--root={root}")
-    cmd.extend([f"--plugin={cfg.plugin}", str(filepath), "--no_vo"])
+    cmd.extend([f"--plugin={cfg.plugin}", str(filepath), "--no_vo", f"--max_errors={max_errors}"])
     subprocess.run(cmd, capture_output=True, text=True)
 
     if not out.exists():
@@ -89,7 +89,7 @@ def compute_ast(
     keep_raw: bool = False,
     cfg: FccConfig = FccConfig(),
 ) -> List[VernacElement]:
-    ast_dump = load_ast_dump(filepath, force_dump=force_dump, cfg=cfg)
+    ast_dump, diags = load_ast_dump(filepath, force_dump=force_dump, cfg=cfg)
     return parse_ast_dump(ast_dump, on_unsupported=on_unsupported, keep_raw=keep_raw)
 
 
