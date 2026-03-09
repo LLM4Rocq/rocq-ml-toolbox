@@ -32,6 +32,8 @@ class Target:
     lib: str
     packages: List[str]
     extra_coq_proj_args: List[str] = field(default_factory=list)
+    copy_skeleton: bool = False
+    copy_elpi: bool = False
     @classmethod
     def from_json(cls, x: dict) -> Target:
         return cls(**x)
@@ -57,11 +59,12 @@ class OpamConfig(DockerConfig):
     """Configuration for building an Opam Docker image."""
     opam_env_path: str
     version: str
+    extra_coq_proj_args: List[str] = field(default_factory=list)
     packages: list[str] = field(default_factory=list)
     dependencies: List[str] = field(default_factory=list)
     pins: list[str] = field(default_factory=list)
     targets: List[Target] = field(default_factory=list)
-
+    
     @classmethod
     def from_yaml(cls, path: Union[str, Path]) -> Self:
         """Load an `OpamConfig` from a YAML file."""
