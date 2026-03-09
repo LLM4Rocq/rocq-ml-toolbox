@@ -13,6 +13,56 @@ from .config import OpamConfig
 from .docker import BaseDocker
 from ..parser.parser import Source
 from .matches import match_paths
+
+import re
+
+# Matches:
+#   Declare ML Module "foo" "bar:baz.qux".
+# across spaces/newlines, but only inside Declare ML Module commands.
+_DECLARE_ML_MODULE_RE = re.compile(
+    r'(\bDeclare\s+ML\s+Module\b)'      # command head
+    r'(?P<mods>(?:\s*"[^"]*")+)'        # one or more quoted strings
+    r'(\s*\.)',                         # terminating dot
+    re.MULTILINE,
+)
+
+_QUOTED_RE = re.compile(r'"([^"]*)"')
+
+# Heuristic for a modern/public plugin name, e.g. coq-core.plugins.ssreflect
+_PUBLIC_RE = re.compile(r'^[A-Za-z0-9_+-]+(?:\.[A-Za-z0-9_+-]+)+$')
+
+
+def _normalize_plugin_name(name: str) -> str:
+    # Already modern syntax: keep unchanged
+    if ":" not in name:
+        return name
+
+    legacy, public = name.split(":", 1)
+
+    # Only rewrite obvious legacy:public declarations.
+    # If it does not look like a public findlib name, leave it unchanged.
+    if legacy and _PUBLIC_RE.fullmatch(public):
+        return public
+
+    return name
+
+
+def normalize_declare_ml_module_syntax(source: str) -> str:
+    def repl_decl(match: re.Match[str]) -> str:
+        head = match.group(1)
+        mods = match.group("mods")
+        tail = match.group(3)
+
+        def repl_quoted(qm: re.Match[str]) -> str:
+            original = qm.group(1)
+            rewritten = _normalize_plugin_name(original)
+            return f'"{rewritten}"'
+
+        new_mods = _QUOTED_RE.sub(repl_quoted, mods)
+        return f"{head}{new_mods}{tail}"
+
+    return _DECLARE_ML_MODULE_RE.sub(repl_decl, source)
+
 class OpamDocker(BaseDocker):
     """Wraps Docker interactions for extracting data from an OPAM switch."""
 
@@ -136,13 +186,9 @@ class OpamDocker(BaseDocker):
 
     def extract_source_files_from_corelib(self) -> List[Source]:
         sources_path = os.path.join(self.opam_env_path, "lib/coq/theories")
-        target_path = os.path.join(self.opam_env_path, "lib/coq/user-contrib/", "Corelib_copy")
+        target_path = os.path.join(self.opam_env_path, "lib/coq/user-contrib/Corelib_duplicate")
+
         self.cp(sources_path, target_path)
-
-        # path_target = os.path.join(target_path, '_CoqProject')
-        # content = f'-R . C'
-        # self.write_file(path_target, content)
-
         subfiles = self.exec_cmd(f"find {target_path}").splitlines()
         return [self.get_source(filepath) for filepath in subfiles if filepath.endswith('.v')]
 
@@ -151,6 +197,25 @@ class OpamDocker(BaseDocker):
         subpaths = self.extract_files_from_target(target)
         filepaths = [file for file in subpaths if file.endswith('.v')]
         return [self.get_source(filepath) for filepath in filepaths]
+
+    def extract_target_name(self, package: str) -> Optional[str]:
+        """Attempt to extract lib name from package."""
+        package_path = os.path.join(self.opam_env_path, ".opam-switch/sources/", package)
+        subfiles = self.exec_cmd(f"find {package_path}").splitlines()
+
+        proj_filename = None
+        if '_CoqProject' in subfiles:
+            proj_filename = '_CoqProject'
+        if '_RocqProject' in subfiles:
+            proj_filename = '_RocqProject'
+        
+        if proj_filename:
+            proj_filepath = os.path.join(package_path, proj_filename)
+            content = self.read_file(proj_filepath)
+            m = re.search(r'-R\s+\S+\s+(\S+)', content)
+            if m:
+                return m.group(1)
+        return None
 
     def extract_files_from_package(self, package: str) -> List[str]:
         """List all files shipped with an installed package."""
@@ -168,14 +233,17 @@ class OpamDocker(BaseDocker):
         skeleton_v_package = [Path(p) for p in skeleton_v if p.endswith('.v')]
         return skeleton_vo_target, skeleton_v_target, skeleton_v_package
     
-    def add_coqproject(self, target: str, extra_coq_proj_args: List[str]=[]):
+    def add_coqproject(self, target: str, extra_coq_proj_args: List[str]=[], target_replace: Optional[str]=None):
         sources_path = os.path.join(self.opam_env_path, "lib/coq/user-contrib/", target)
         path_target = os.path.join(sources_path, '_CoqProject')
+        if target_replace:
+            target = target_replace
         content = f'-R . {target}\n'
-        content += '\n'.join(extra_coq_proj_args)
+        if extra_coq_proj_args:
+            content += '\n'.join(extra_coq_proj_args)
         self.write_file(path_target, content)
     
-    def copy_coq_files_from_package_to_target(self, package: str, target: str, extra_coq_proj_args: List[str]=[]):
+    def copy_coq_files_from_package_to_target(self, package: str, target: str):
         vo_paths_target, v_paths_target, v_paths_package = self._map_vo_v_package_target(package, target)
         mapping, _ = match_paths(vo_paths_target, v_paths_package) 
         for package_p, target_p in mapping.items():
@@ -183,6 +251,33 @@ class OpamDocker(BaseDocker):
             if package_target not in v_paths_target:
                 content = self.read_file(target_p)
                 self.write_file(package_target, content)
+
+    def copy_elpi_files_from_package_to_target(self, package: str, target: str):
+        vo_paths_target, _, v_paths_package = self._map_vo_v_package_target(package, target)
+        mapping, _ = match_paths(vo_paths_target, v_paths_package)
+
+        # package dir -> installed dir
+        dir_map = {src_v.parent: dst_vo.parent for dst_vo, src_v in mapping.items()}
+        existing = {Path(p) for p in self.extract_files_from_target(target)}
+
+        for src in map(Path, self.extract_files_from_package(package)):
+            if src.suffix != ".elpi":
+                continue
+            for src_root, dst_root in sorted(dir_map.items(), key=lambda kv: len(kv[0].parts), reverse=True):
+                try:
+                    rel = src.relative_to(src_root)
+                except ValueError:
+                    continue
+                dst = dst_root / rel
+                if dst not in existing:
+                    self.write_file(str(dst), self.read_file(str(src)))
+                    existing.add(dst)
+                break
+
+    def remove_legacy_plugin_from_source(self, source: Source):
+        new_content = normalize_declare_ml_module_syntax(source.content)
+        source.content = new_content
+        self.write_file(source.path, new_content)
 
     def get_source(self, filepath: str) -> Source:
         """Return a `Source` dataclass for a file inside the container."""
