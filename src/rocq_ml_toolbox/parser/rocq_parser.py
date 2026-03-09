@@ -72,7 +72,7 @@ class RocqParser:
         result = self.client.run(state, 'Print LoadPath.', timeout=timeout)
         return parse_loadpath(result.feedback[0][1])
 
-    def extract_toc(self, source: Source, root=Optional[str]) -> Tuple[List[VernacElement], List[Diagnostic]]:
+    def extract_toc(self, source: Source, root:Optional[str]=None) -> Tuple[List[VernacElement], List[Diagnostic]]:
         toc, diags = self.client.get_ast(source.path, root=root)
         content_utf_8 = source.content.encode("utf-8")
         for entry in toc:
