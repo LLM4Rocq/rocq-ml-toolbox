@@ -1,7 +1,7 @@
 from pytanque import Pytanque, PytanqueMode
 import requests
 from pathlib import Path
-from typing import List, Optional, Union, Any, Self
+from typing import List, Optional, Union, Any, Self, Tuple
 
 from ..parser.diags.parser import Diagnostic
 from ..parser.ast.driver import parse_ast_dump, VernacElement
