@@ -2,6 +2,8 @@ from enum import StrEnum
 from typing import List
 
 class PetStatus(StrEnum):
+    DOWN = "DOWN"
+    STARTING = "STARTING"
     OK = "OK"
     RESTART_NEEDED = "RESTART_NEEDED"
     RESTARTING = "RESTARTING"
@@ -36,6 +38,9 @@ def archived_sessions_key() -> str:
 def arbiter_key() -> str:
     return f"arbiter"
 
+def arbiter_heartbeat_key() -> str:
+    return "arbiter:heartbeat"
+
 ALL_KEYS_STAR = [
     session_key('*'),
     mapping_state_key('*'),
@@ -46,6 +51,7 @@ ALL_KEYS_STAR = [
     monitor_epoch_key('*'),
     session_assigned_idx_key(),
     archived_sessions_key(),
-    arbiter_key()
+    arbiter_key(),
+    arbiter_heartbeat_key(),
 ]
     
