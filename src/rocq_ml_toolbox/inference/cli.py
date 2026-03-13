@@ -11,10 +11,15 @@ import socket
 from typing import List, Optional
 from pathlib import Path
 import time
-from setproctitle import setproctitle
+try:
+    from setproctitle import setproctitle
+except Exception:
+    def setproctitle(_: str) -> None:
+        return None
+
 setproctitle("rocq-ml-server")
 
-from .redis_keys import arbiter_key
+from .redis_keys import PetStatus, arbiter_key
 DEFAULT_APP = "rocq_ml_toolbox.inference.server:app"
 DEFAULT_CONFIG = "python:rocq_ml_toolbox.inference.gunicorn_config"
 
@@ -55,6 +60,18 @@ def is_port_available(port: int, host: str = "0.0.0.0") -> bool:
         return False
     finally:
         s.close()
+
+
+def terminate_process(proc: subprocess.Popen, timeout_s: float = 5.0) -> None:
+    try:
+        proc.terminate()
+        proc.wait(timeout=timeout_s)
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except Exception:
+            pass
 
 def main(argv: Optional[List[str]] = None) -> None:
     p = argparse.ArgumentParser(prog="rocq-ml-server")
@@ -122,42 +139,55 @@ def main(argv: Optional[List[str]] = None) -> None:
     deadline = time.monotonic() + 60
     arbiter_ready = False
     while time.monotonic() < deadline:
+        if arbiter_proc.poll() is not None:
+            break
         res = redis_client.get(arbiter_key())
         if res and int(res) == 1:
             arbiter_ready = True
             break
+        time.sleep(0.2)
     
     if not arbiter_ready:
-        raise TimeoutError(f"Arbiter does not respond.")
+        terminate_process(arbiter_proc)
+        raise TimeoutError(
+            "Arbiter does not respond.\n"
+            f"Arbiter return code: {arbiter_proc.poll()}\n"
+            f"Arbiter log tail:\n{tail(arbiter_log)}"
+        )
 
     for pet_idx in range(args.num_pet_server):
         req_id = str(uuid.uuid4())
         reply_channel = f"arbiter:reply:{pet_idx}:{req_id}"
         ps = redis_client.pubsub(ignore_subscribe_messages=True)
         ps.subscribe(reply_channel)
-        req = {"id": req_id, "reply_to": reply_channel}
-        redis_client.publish(f"arbiter:req:{pet_idx}", json.dumps(req))
-        deadline = time.monotonic() + 60
-        pet_is_ok = False
-        while time.monotonic() < deadline:
-            msg = ps.get_message(timeout=1.0)
-            if not msg:
-                continue
-            if msg["type"] != "message":
-                continue
-            resp = json.loads(msg["data"])
-            if resp.get("id") == req_id:
-                pet_is_ok = True
-            break
-            
-        if not pet_is_ok:
+        try:
+            req = {"id": req_id, "reply_to": reply_channel}
+            redis_client.publish(f"arbiter:req:{pet_idx}", json.dumps(req))
+            deadline = time.monotonic() + 60
+            pet_is_ok = False
+            while time.monotonic() < deadline:
+                msg = ps.get_message(timeout=1.0)
+                if not msg:
+                    continue
+                if msg["type"] != "message":
+                    continue
+                resp = json.loads(msg["data"])
+                if resp.get("id") != req_id:
+                    continue
+                pet_is_ok = (
+                    resp.get("resp") == "OK" and resp.get("status") == PetStatus.OK
+                )
+                break
+        finally:
             try:
-                arbiter_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                arbiter_proc.kill()
+                ps.unsubscribe(reply_channel)
+            finally:
+                ps.close()
 
+        if not pet_is_ok:
+            terminate_process(arbiter_proc)
             raise TimeoutError(
-                f"Pet-server at {pet_idx} does not respond.\n"
+                f"Pet-server at {pet_idx} is not ready.\n"
                 f"Arbiter return code: {arbiter_proc.poll()}\n"
                 f"Arbiter log tail:\n{tail(arbiter_log)}"
             )
@@ -176,8 +206,4 @@ def main(argv: Optional[List[str]] = None) -> None:
             print("\nStopping server and arbiter...")
         finally:
             # Ensure the arbiter is killed when the server stops
-            arbiter_proc.terminate()
-            try:
-                arbiter_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                arbiter_proc.kill()
+            terminate_process(arbiter_proc)
