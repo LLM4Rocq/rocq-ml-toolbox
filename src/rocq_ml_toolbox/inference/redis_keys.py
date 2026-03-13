@@ -26,6 +26,12 @@ def generation_key(pet_idx: int) -> str:
 def pet_lock_key(pet_idx: int) -> str:
     return f"pet_lock:{pet_idx}"
 
+def pet_profile_key(pet_idx: int) -> str:
+    return f"pet_profile:{pet_idx}"
+
+def profile_bootstrap_key(profile: str) -> str:
+    return f"profile_bootstrap:{profile}"
+
 def monitor_epoch_key(pet_idx: int) -> str:
     return f"pet_monitor_epoch:{pet_idx}"
 
@@ -48,6 +54,8 @@ ALL_KEYS_STAR = [
     pet_status_key('*'),
     generation_key('*'),
     pet_lock_key('*'),
+    pet_profile_key('*'),
+    profile_bootstrap_key('*'),
     monitor_epoch_key('*'),
     session_assigned_idx_key(),
     archived_sessions_key(),
