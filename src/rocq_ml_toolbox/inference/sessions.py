@@ -17,11 +17,11 @@ from redis.lock import Lock
 
 from .redis_keys import (
     PetStatus,
-    session_key,
+    arbiter_heartbeat_key,
+    arbiter_key,
     pet_status_key,
     generation_key,
     pet_lock_key,
-    monitor_epoch_key,
     archived_sessions_key,
     session_assigned_idx_key
 )
@@ -62,6 +62,7 @@ def log_timing(name: str | None = None):
 
 class SessionManagerError(Exception):
     def __init__(self, message, require_restart=False):
+        super().__init__(message)
         self.message = message
         self.require_restart = require_restart
 
@@ -128,6 +129,45 @@ class SessionManager:
                 return False
         return True
 
+    def health_snapshot(self, max_heartbeat_age: float = 5.0) -> dict[str, Any]:
+        now = time.time()
+        arbiter_ready_raw = self.redis_client.get(arbiter_key())
+        arbiter_ready = bool(arbiter_ready_raw and int(arbiter_ready_raw) == 1)
+
+        heartbeat_raw = self.redis_client.get(arbiter_heartbeat_key())
+        heartbeat_age_s: Optional[float] = None
+        heartbeat_ok = False
+        if heartbeat_raw is not None:
+            try:
+                heartbeat_age_s = max(0.0, now - float(heartbeat_raw))
+                heartbeat_ok = heartbeat_age_s <= max_heartbeat_age
+            except Exception:
+                heartbeat_ok = False
+
+        workers: dict[str, Any] = {}
+        workers_ok = True
+        for pet_idx in range(self.num_pet_server):
+            status_raw = self.redis_client.get(pet_status_key(pet_idx))
+            status = status_raw.decode() if status_raw else "MISSING"
+            gen_raw = self.redis_client.get(generation_key(pet_idx))
+            generation = int(gen_raw) if gen_raw is not None else None
+            workers[str(pet_idx)] = {
+                "status": status,
+                "generation": generation,
+            }
+            workers_ok = workers_ok and status == PetStatus.OK
+
+        ok = arbiter_ready and heartbeat_ok and workers_ok
+        return {
+            "ok": ok,
+            "arbiter": {
+                "ready": arbiter_ready,
+                "heartbeat_ok": heartbeat_ok,
+                "heartbeat_age_s": heartbeat_age_s,
+            },
+            "workers": workers,
+        }
+
     @log_timing()
     def ensure_pet_ok(self, pet_idx: int, timeout=15):
         req_id = str(uuid.uuid4())
@@ -150,8 +190,13 @@ class SessionManager:
 
                 resp = json.loads(msg["data"])
                 if resp.get("id") == req_id:
-                    # optionally validate resp["state"] etc.
-                    return
+                    status = resp.get("status")
+                    if status == PetStatus.OK:
+                        return
+                    raise SessionManagerError(
+                        f"pet_idx {pet_idx} unavailable (status={status})",
+                        require_restart=True,
+                    )
 
             # timed out waiting for arbiter reply; decide based on state key
             state = self.redis_client.get(pet_status_key(pet_idx))
@@ -175,7 +220,8 @@ class SessionManager:
         lock = self.redis_client.lock(
             pet_lock_key(pet_idx),
             timeout=timeout,
-            blocking=True
+            blocking=True,
+            blocking_timeout=None,
         )
         acquired = lock.acquire()
         if not acquired:
@@ -334,6 +380,7 @@ class SessionManager:
         lock: Optional[Lock] = None
         try:
             lock = self.acquire_pet_lock(pet_idx, timeout=self.timeout_ok + self.timeout_eps)
+            SessionManager._extend_lock_infinity(lock)
             self.ensure_pet_ok(pet_idx, timeout=self.timeout_ok)
             # in rare cases pet server may have crashed between the first `from_redis`, and the Lock acquire
             session = Session.from_redis(session_id, self.redis_client)
