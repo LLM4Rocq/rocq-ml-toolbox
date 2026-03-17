@@ -31,5 +31,4 @@ for proof in parser.extract_proofs(source):
 ## AST helpers
 The `parser.ast.driver` module exposes:
 - `load_ast_dump` and `parse_ast_dump` for JSONL dumps.
-- `compute_ast` for a one-shot parse.
 - `iter_v_files` to iterate over `.v` files in a tree.
