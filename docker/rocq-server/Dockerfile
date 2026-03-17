@@ -1,4 +1,5 @@
-FROM theostos/rocq-lsp:9.0
+ARG BASE_IMAGE=theostos/rocq-lsp:9.0
+FROM ${BASE_IMAGE}
 
 USER rocq
 WORKDIR /home/rocq

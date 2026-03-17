@@ -1,4 +1,5 @@
-FROM theostos/coq-lsp:8.20
+ARG BASE_IMAGE=theostos/coq-lsp:8.20
+FROM ${BASE_IMAGE}
 
 USER coq
 WORKDIR /home/coq

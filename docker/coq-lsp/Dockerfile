@@ -15,4 +15,4 @@ RUN if [ ! -d "$HOME/.opam" ]; then opam init --bare --disable-sandboxing; fi &&
     opam upgrade && \
     opam unpin ocamlfind && \
     opam install -y logs lwt && \
-    opam pin add -y git+https://github.com/theostos/rocq-lsp#proofdepsdump-dump-load-v8.20 \
+    opam pin add -y git+https://github.com/theostos/rocq-lsp#proofdepsdump-dump-load-v8.20

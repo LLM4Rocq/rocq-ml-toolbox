@@ -8,6 +8,10 @@ services:
     image: theostos/coq-server:8.20
     build:
       context: ./coq-server
+      args:
+        BASE_IMAGE: coq-lsp
+      additional_contexts:
+        coq-lsp: "service:coq-lsp"
     depends_on:
       - coq-lsp
 
@@ -20,5 +24,9 @@ services:
     image: theostos/rocq-server:9.0
     build:
       context: ./rocq-server
+      args:
+        BASE_IMAGE: rocq-lsp
+      additional_contexts:
+        rocq-lsp: "service:rocq-lsp"
     depends_on:
       - rocq-lsp
