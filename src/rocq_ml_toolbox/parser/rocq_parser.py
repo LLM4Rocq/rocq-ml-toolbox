@@ -73,7 +73,7 @@ class RocqParser:
         return parse_loadpath(result.feedback[0][1])
 
     def extract_toc(self, source: Source, root:Optional[str]=None, force_dump=True) -> Tuple[List[VernacElement], List[Diagnostic]]:
-        toc, diags = self.client.get_ast(source.path, root=root, force_dump=force_dump)
+        _, toc, diags = self.client.get_dump(source.path, root=root, force_dump=force_dump)
         content_utf_8 = source.content.encode("utf-8")
         for entry in toc:
             if entry.span:
@@ -106,7 +106,7 @@ class RocqParser:
         return result
     
     def ast(self, source: Source, root: Optional[Path]=None,check_hb=True) -> Tuple[List[VernacElement], List[VernacElement]]:
-        ast, _ = self.client.get_ast(source.path, root=root)
+        _, ast, _ = self.client.get_dump(source.path, root=root)
     
         target_elements = []
         proof_elements = []
