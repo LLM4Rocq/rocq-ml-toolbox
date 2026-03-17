@@ -251,7 +251,7 @@ class Session(RedisSessionSerializable):
     @classmethod
     def from_redis(
         cls,
-        session_id: int,
+        session_id: str,
         redis: Redis
     ) -> Session:
         key = f"{cls.redis_key}:{session_id}"

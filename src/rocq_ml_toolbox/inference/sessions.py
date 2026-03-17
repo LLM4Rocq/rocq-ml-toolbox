@@ -107,10 +107,11 @@ class SessionManager:
         self.worker_generations[pet_idx] = current_gen
         return worker
 
-    def _restart_worker(self, pet_idx: int) -> Pytanque:
+    def _restart_worker(self, pet_idx: int):
         """Remove worker at pet_idx"""
-        if self.pytanques[pet_idx]:
-            self.pytanques[pet_idx].close()
+        client = self.pytanques[pet_idx]
+        if client:
+            client.close()
             self.pytanques[pet_idx] = None
 
     def archive_session(self, session: Session, params_tree: ParamsTree):
@@ -230,7 +231,7 @@ class SessionManager:
 
     def create_session(self) -> str:
         """Create a new session with load-balanced pet-server assignment."""
-        assigned_idx = self.redis_client.incr(session_assigned_idx_key())
+        assigned_idx = int(self.redis_client.incr(session_assigned_idx_key()))
         assigned_idx = assigned_idx % self.num_pet_server
         session = Session(pet_idx=assigned_idx)
         mapping_state = MappingState()
@@ -329,7 +330,7 @@ class SessionManager:
         logging.info(f"[{session.id}] State inconsistency, replay mechanism ON.")
         for node in replay_session:
             logging.info(f"[{session.id}] REPLAY: {node.query_kwargs.params}")
-            state = mapping_state.get(node.state_key, None)
+            state = mapping_state[node.state_key]
                 
             # if state is outdated or None then regenerate it
             if not state or state.generation < current_generation:
