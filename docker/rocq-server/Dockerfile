@@ -1,6 +1,19 @@
 ARG BASE_IMAGE=theostos/rocq-lsp:9.0
 FROM ${BASE_IMAGE}
 
+USER root
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl gpg lsb-release && \
+    curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg && \
+    chmod 644 /usr/share/keyrings/redis-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" \
+      > /etc/apt/sources.list.d/redis.list && \
+    printf 'Package: redis redis-server redis-sentinel redis-tools\nPin: version 6:7.4.*\nPin-Priority: 1001\n' \
+      > /etc/apt/preferences.d/redis && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends redis redis-server redis-tools && \
+    rm -rf /var/lib/apt/lists/*
+
 USER rocq
 WORKDIR /home/rocq
 
