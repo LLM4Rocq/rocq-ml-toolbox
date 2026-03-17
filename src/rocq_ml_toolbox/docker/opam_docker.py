@@ -1,6 +1,7 @@
 """Helpers to manage Docker containers for OPAM-based Coq environments."""
 
 import os
+import shlex
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import re
@@ -13,8 +14,6 @@ from .config import OpamConfig
 from .docker import BaseDocker
 from ..parser.parser import Source
 from .matches import match_paths
-
-import re
 
 # Matches:
 #   Declare ML Module "foo" "bar:baz.qux".
@@ -66,41 +65,17 @@ def normalize_declare_ml_module_syntax(source: str) -> str:
 class OpamDocker(BaseDocker):
     """Wraps Docker interactions for extracting data from an OPAM switch."""
 
-    def __init__(self, config:OpamConfig, redis_image: str= "redis:latest", redis_port:int = 6379, rebuild=False, kill_clone=True, update_rocq_ml=False):
+    def __init__(self, config:OpamConfig, rebuild=False, kill_clone=True, update_rocq_ml=False):
         """Start or reuse a container built from the given OPAM configuration."""
         super().__init__(config, kill_clone=kill_clone, rebuild=rebuild)
-        if kill_clone: self._kill_clone(redis_image)
-
-        self.redis_container = self.client.containers.run(
-            redis_image,
-            detach=True,
-            ports={"6379/tcp": ("127.0.0.1", redis_port)},
-            restart_policy={"Name": "unless-stopped"}
-        )
         self.opam_env_path = config.opam_env_path
         self.config = config
-        # if self.config.user == "coq":
-        #     cmd = f"""
-        #     /home/{self.config.user}/miniconda/bin/conda run -n rocq-ml pip install pyyaml
-        #     """
-        #     self.exec_cmd(["bash", "-lc", cmd])
-        #     self.container.commit(self.config.name, self.config.tag)
         if update_rocq_ml:
             self.exec_cmd([
                 "bash",
                 "-lc",
-                "cd ~/rocq-ml-toolbox && git pull && git switch unified_fastapi"
+                "cd ~/rocq-ml-toolbox && git pull"
             ])
-            self.exec_cmd([
-                "bash",
-                "-lc",
-                "cd ~/pytanque-repo && git pull && git switch pytanque_http"
-            ])
-            cmd = f"""
-            /home/{self.config.user}/miniconda/bin/conda run -n rocq-ml pip install setproctitle
-            """
-            self.exec_cmd(["bash", "-lc", cmd])
-            # self.container.commit(self.config.name, self.config.tag)
 
 
     def install_project(self, project: str, extra_args: str = ""):
@@ -114,7 +89,6 @@ class OpamDocker(BaseDocker):
 
     def close(self):
         """Stop and remove the underlying containers."""
-        self.kill_container(self.redis_container)
         super().close()
 
     def pin_project(self, text: str):
@@ -147,29 +121,78 @@ class OpamDocker(BaseDocker):
 
         self.container.commit(self.config.name, self.config.tag)
 
-    def start_inference_server(self, port=5000, timeout=600, workers=9, num_pet_server=4, pet_server_start_port=8765, max_ram_per_pet=4096):
+    def wait_redis_ready(self, port=6379, timeout=10.0, interval=0.1):
+        """Wait until Redis answers PING with PONG."""
+        deadline = time.monotonic() + timeout
+        last_error = None
+
+        while time.monotonic() < deadline:
+            try:
+                out = self.exec_cmd(
+                    ["redis-cli", "-p", str(port), "ping"]
+                ).strip()
+                if out == "PONG":
+                    return
+                last_error = f"unexpected response: {out!r}"
+            except Exception as e:
+                last_error = str(e)
+
+            time.sleep(interval)
+
+        raise TimeoutError(
+            f"Redis was not ready within {timeout}s on port {port}. "
+            f"Last error: {last_error}"
+        )
+
+    def start_redis_server(self, port=6379):
+        """Launch redis-server inside the container."""
+        self.exec_cmd_async(f"bash -lc redis-server --port {port}")
+        self.wait_redis_ready(port)
+
+
+    def start_inference_server(self, port=5000, redis_port=6379, timeout=600, workers=9, num_pet_server=4, pet_server_start_port=8765, max_ram_per_pet=4096):
         """Launch pet-server inside the container."""
-        self.pet_port = port
-        pet_server_path = os.path.join(self.config.opam_env_path, 'bin/pet-server')
-        cmd = f"""
-        /home/{self.config.user}/miniconda/bin/conda run -n rocq-ml rocq-ml-server -p {port} -w {workers} -t {timeout} -d -l \
-        --num-pet-server {num_pet_server} \
-        --pet-server-start-port {pet_server_start_port} \
-        --max-ram-per-pet {max_ram_per_pet} \
-        --pet-server-cmd {pet_server_path}
+        self.start_redis_server(redis_port)
+        self.pet_port = pet_server_start_port
+        opam_bin = os.path.join(self.config.opam_env_path, "bin")
+        pet_server_path = os.path.join(opam_bin, "pet-server")
+        conda_env_bin = f"/home/{self.config.user}/miniconda/envs/rocq-ml/bin"
+        conda_root_bin = f"/home/{self.config.user}/miniconda/bin"
+        rocq_ml_server_bin = f"/home/{self.config.user}/miniconda/envs/rocq-ml/bin/rocq-ml-server"
+        redis_url = f"redis://localhost:{redis_port}/0"
+
+        cmd = f"""\
+        set -e
+        eval "$(opam env)"
+        export PATH={shlex.quote(opam_bin)}:{shlex.quote(conda_env_bin)}:{shlex.quote(conda_root_bin)}:$PATH
+        {shlex.quote(rocq_ml_server_bin)} -p {port} -w {workers} -t {timeout} -d \\
+          --redis-url {shlex.quote(redis_url)} \\
+          --num-pet-server {num_pet_server} \\
+          --pet-server-start-port {pet_server_start_port} \\
+          --max-ram-per-pet {max_ram_per_pet} \\
+          --pet-server-cmd {shlex.quote(pet_server_path)}
         """
-        self.exec_cmd(["bash", "-lc", cmd])
+        self.exec_cmd(["bash", "-lc", cmd], check=False)
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                resp = requests.get(f"http://127.0.0.1:{port}/health")
+                resp = requests.get(f"http://127.0.0.1:{port}/health", timeout=1.0)
                 if resp.status_code == 200:
                     return
-            except Exception as e:
+            except requests.RequestException:
                 pass
             time.sleep(1)
-        log = self.exec_cmd("sh -lc 'tail -n +200 /tmp/gunicorn-error.log || true'")
-        raise RuntimeError(f"rocq-ml-server failed to start on port {port}.\n{log}")
+        logs = []
+        for log_path in (
+            f"/home/{self.config.user}/arbiter.log",
+            f"/home/{self.config.user}/server.log",
+            "/tmp/gunicorn-error.log",
+        ):
+            out = self.exec_cmd(f"sh -lc 'tail -n 200 {shlex.quote(log_path)} 2>/dev/null || true'").strip()
+            if out:
+                logs.append(f"== {log_path} ==\n{out}")
+        logs_txt = "\n\n".join(logs) if logs else "(no logs found)"
+        raise RuntimeError(f"rocq-ml-server failed to start on port {port}.\n{logs_txt}")
 
     def list_opam_folder(self) -> List[str]:
         "Extract all opam folder"

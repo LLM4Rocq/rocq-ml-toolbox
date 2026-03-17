@@ -1,18 +1,17 @@
 from pathlib import Path
-from typing import Optional, Union
-import re
+from typing import Union, Optional
 import shlex
 import sys
 from abc import abstractmethod, ABC
 import io
 import tarfile
 from pathlib import PurePosixPath
+import time
 
 import docker
 from docker.models.containers import Container
 
-from .config import OpamConfig, DockerConfig
-from ..parser.parser import Source
+from .config import DockerConfig
 
 class BaseDocker(ABC):
     """Wraps Docker interactions."""
@@ -107,8 +106,63 @@ class BaseDocker(ABC):
         status = api.exec_inspect(exec_id)
         return int(status.get("ExitCode", 1))
 
-    def exec_cmd(self, cmd) -> str:
+    def exec_cmd_async(
+        self,
+        cmd,
+        *,
+        user: Optional[str] = None,
+        workdir: Optional[str] = None,
+        environment=None,
+        tty: bool = False,
+    ) -> str:
+        """Start a command inside the container and return immediately."""
+        self._ensure_running()
+        api = self.client.api
+        if user is None:
+            user = self.config.user
+
+        exec_id = api.exec_create(
+            self.container.id,
+            cmd,
+            stdout=False,
+            stderr=False,
+            tty=tty,
+            user=user,
+            environment=environment,
+            workdir=workdir,
+        )["Id"]
+
+        api.exec_start(exec_id, detach=True, tty=tty)
+        return exec_id
+
+    def exec_status(self, exec_id: str) -> dict:
+        """Return low-level status information for a detached exec."""
+        return self.client.api.exec_inspect(exec_id)
+
+    def wait_exec(
+        self,
+        exec_id: str,
+        *,
+        poll_interval: float = 0.2,
+        timeout: Optional[float] = None,
+    ) -> int:
+        """Wait for a detached exec to finish and return its exit code."""
+        start = time.monotonic()
+
+        while True:
+            info = self.client.api.exec_inspect(exec_id)
+
+            if not info.get("Running", False):
+                return int(info.get("ExitCode", 1))
+
+            if timeout is not None and (time.monotonic() - start) > timeout:
+                raise TimeoutError(f"Exec {exec_id} did not finish within {timeout} seconds")
+
+            time.sleep(poll_interval)
+
+    def exec_cmd(self, cmd, *, check: bool = True) -> str:
         """Execute a command without streaming and return its stdout."""
+        self._ensure_running()
         api = self.client.api
         exec_id = api.exec_create(
             self.container.id,
@@ -116,8 +170,22 @@ class BaseDocker(ABC):
             stdout=True,
             stderr=True,
             tty=False,
+            user=self.config.user,
         )["Id"]
-        return self.client.api.exec_start(exec_id).decode('utf-8')
+        stdout, stderr = self.client.api.exec_start(exec_id, demux=True)
+        status = api.exec_inspect(exec_id)
+        code = int(status.get("ExitCode", 1))
+
+        out_text = (stdout or b"").decode("utf-8", errors="replace")
+        err_text = (stderr or b"").decode("utf-8", errors="replace")
+        if check and code != 0:
+            raise RuntimeError(
+                f"Command failed in container (exit={code}).\n"
+                f"cmd={cmd}\n"
+                f"stdout:\n{out_text}\n"
+                f"stderr:\n{err_text}"
+            )
+        return out_text
 
     def read_file(self, filepath: Union[str, Path], max_bytes=None, encoding="utf-8") -> str:
         """Read a file from the container filesystem."""
