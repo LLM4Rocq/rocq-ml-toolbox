@@ -13,7 +13,7 @@ from pytanque.client import RouteName, PetanqueError, Response
 from pytanque.protocol import Failure, Error
 from pytanque.routes import PETANQUE_ROUTES
 from .sessions import SessionManager
-from ..parser.ast.driver import load_ast_dump
+from ..parser.ast.driver import load_proof_dump
 from ..parser.glob.driver import load_glob_file
 
 logger = logging.getLogger("session")
@@ -99,15 +99,17 @@ class GetGlobBody(BaseModel):
     path: str
     force_compile: bool=False
 
-@app.post("/get_ast")
-def get_ast(body: GetAstBody):
+@app.post("/get_dump")
+def get_dump(body: GetAstBody):
     """
     Extract full AST (verbatim) from document at `path`.
     """
     logging.info(f"get_ast: {body.path}")
-    ast, diags = load_ast_dump(body.path, root=body.root, force_dump=body.force_dump)
+    proof, ast, diags = load_proof_dump(body.path, root=body.root, force_dump=body.force_dump)
     def gen():
-        yield '{"value":'
+        yield '{"proof":'
+        yield json.dumps(proof)
+        yield ', "ast":'
         yield json.dumps(ast)
         yield ', "diags":'
         yield json.dumps([d.to_json() for d in diags])
@@ -118,7 +120,7 @@ def get_ast(body: GetAstBody):
 @app.post("/get_glob")
 def get_glob(body: GetGlobBody):
     """
-    Extract full AST (verbatim) from document at `path`.
+    Extract glob (verbatim) from document at `path`.
     """
     logging.info(f"get_glob: {body.path}")
     output = {"value": load_glob_file(body.path, force_compile=body.force_compile)}
