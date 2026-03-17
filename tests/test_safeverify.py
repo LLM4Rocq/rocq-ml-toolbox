@@ -186,8 +186,32 @@ Axiom extA : True.
 Theorem t : True.
 Proof. exact extA. Qed.
 """
-    whitelist = json.dumps({"axioms": ["extA"]})
+    whitelist = json.dumps(["extA"])
     report, _, _, _ = _run_pair(tmp_path, source, target, whitelist=whitelist)
+
+    assert report.ok is True
+
+
+def test_pass_whitelisted_axiom_inline_list(tmp_path: Path):
+    source = """
+Theorem t : True.
+Admitted.
+"""
+    target = """
+Axiom extA : True.
+Theorem t : True.
+Proof. exact extA. Qed.
+"""
+    source_path = _write(tmp_path / "Source.v", source)
+    target_path = _write(tmp_path / "Target.v", target)
+
+    report = run_safeverify(
+        source_path,
+        target_path,
+        root=tmp_path,
+        axiom_whitelist=["extA"],
+        verbose=True,
+    )
 
     assert report.ok is True
 

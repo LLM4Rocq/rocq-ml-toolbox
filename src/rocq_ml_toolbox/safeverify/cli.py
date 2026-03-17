@@ -18,7 +18,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--axiom-whitelist",
-        help="JSON/YAML whitelist of allowed axioms.",
+        help="Path to a JSON file containing a list of allowed axioms.",
     )
     parser.add_argument(
         "--save",

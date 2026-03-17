@@ -321,45 +321,32 @@ def _compute_logical_module(filepath: Path, root: Path, bindings: Sequence[LoadP
     return candidates[0][1]
 
 
-def _load_whitelist(path: str | Path | None) -> set[str]:
-    if path is None:
-        return set()
-
-    path = Path(path)
-    content = path.read_text(encoding="utf-8")
-
-    if path.suffix.lower() in {".yaml", ".yml"}:
-        try:
-            import yaml  # type: ignore
-        except ImportError as exc:
-            raise RuntimeError("YAML whitelist requires 'pyyaml' to be installed.") from exc
-        data = yaml.safe_load(content)
-    else:
-        data = json.loads(content)
-
-    if data is None:
-        return set()
-
-    if isinstance(data, dict):
-        if "axioms" in data:
-            data = data["axioms"]
-        else:
-            data = list(data.keys())
-
-    if isinstance(data, str):
-        data = [data]
-
-    if not isinstance(data, list):
-        raise ValueError("Whitelist must be a string, a list of strings, or {\"axioms\": [...]}.")
-
+def _normalize_whitelist_entries(items: Sequence[str]) -> set[str]:
     out: set[str] = set()
-    for item in data:
+    for item in items:
         if not isinstance(item, str):
             raise ValueError(f"Whitelist entry must be a string, got: {item!r}")
         value = item.strip()
         if value:
             out.add(value)
     return out
+
+
+def _load_whitelist(whitelist: str | Path | Sequence[str] | None) -> set[str]:
+    if whitelist is None:
+        return set()
+
+    if isinstance(whitelist, (str, Path)):
+        path = Path(whitelist)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            raise ValueError("Whitelist file must contain a JSON list of strings.")
+        return _normalize_whitelist_entries(data)
+
+    if not isinstance(whitelist, Sequence):
+        raise ValueError("Whitelist must be a path to a JSON list or a list of strings.")
+
+    return _normalize_whitelist_entries(whitelist)
 
 
 def _dep_identifier(dep: ProofDependency) -> str:
@@ -513,13 +500,17 @@ def run_safeverify(
     target_path: str | Path,
     *,
     root: str | Path,
-    axiom_whitelist: str | Path | None = None,
+    axiom_whitelist: str | Path | Sequence[str] | None = None,
     save_path: str | Path | None = None,
     verbose: bool = False,
 ) -> VerificationReport:
     root_path = Path(root).resolve()
     source = Path(source_path).resolve()
     target = Path(target_path).resolve()
+
+    whitelist_path: str | None = None
+    if isinstance(axiom_whitelist, (str, Path)):
+        whitelist_path = str(axiom_whitelist)
 
     whitelist: set[str] = set()
     try:
@@ -532,7 +523,7 @@ def run_safeverify(
             config={
                 "verbose": verbose,
                 "axiom_whitelist": [],
-                "axiom_whitelist_path": None if axiom_whitelist is None else str(axiom_whitelist),
+                "axiom_whitelist_path": whitelist_path,
             },
         )
         report.add_global_failure(FailureCode.PARSE_OR_COMPILE_ERROR, f"Whitelist error: {exc}")
@@ -547,7 +538,7 @@ def run_safeverify(
         config={
             "verbose": verbose,
             "axiom_whitelist": sorted(whitelist),
-            "axiom_whitelist_path": None if axiom_whitelist is None else str(axiom_whitelist),
+            "axiom_whitelist_path": whitelist_path,
         },
     )
 

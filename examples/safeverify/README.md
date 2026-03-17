@@ -69,3 +69,5 @@ python -m src.rocq_ml_toolbox.safeverify.cli \
   --root examples/safeverify \
   --axiom-whitelist examples/safeverify/whitelist/whitelist.json -v
 ```
+
+Whitelist files are plain JSON string lists, e.g. `["fake_oracle"]`.
