@@ -55,11 +55,15 @@ def login(request: FastAPIRequest):
     return {"session_id": session_id}
 
 @app.get("/health")
-def health():
+def health(request: FastAPIRequest):
     """
     Check health status.
     """
-    return {"status": "ok"}
+    session_manager: SessionManager = request.app.state.sm
+    snapshot = session_manager.health_snapshot()
+    if not snapshot["ok"]:
+        raise HTTPException(status_code=503, detail=snapshot)
+    return snapshot
 
 @app.post("/rpc")
 def rpc_endpoint(body: JsonRpcBody, request: FastAPIRequest):

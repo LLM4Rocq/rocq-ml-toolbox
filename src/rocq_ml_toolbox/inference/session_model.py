@@ -225,6 +225,7 @@ class MappingTree(RedisSessionSerializable):
 @dataclass
 class Session(RedisSessionSerializable):
     pet_idx: int                       # which pet-server index (0..num_pet_server-1)
+    profile: str = "default"
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     redis_key = "session"
 
@@ -233,12 +234,14 @@ class Session(RedisSessionSerializable):
         return cls(
             id=raw["id"],
             pet_idx=raw["pet_idx"],
+            profile=raw.get("profile", "default"),
         )
 
     def to_json(self) -> dict:
         return {
             "id": self.id,
             "pet_idx": self.pet_idx,
+            "profile": self.profile,
         }
     
     def to_redis(self, redis: Redis) -> None:

@@ -45,11 +45,11 @@ class RocqParser:
             if substate.feedback:
                 for feedback_tuple in substate.feedback:
                     feedback = feedback_tuple[1]
-                    element, is_local = parse_about(feedback, self.map_logical_physical, self.map_physical_logical)
-                    if element:
-                        return element, is_local
+                    element_extr, is_local = parse_about(feedback, self.map_logical_physical, self.map_physical_logical)
+                    if element_extr:
+                        return element_extr, is_local
                 return None, False
-        except PetanqueError:
+        finally:
             return None, False
 
     def extract_dependencies(self, state: State, tactic: str, timeout: int=30) -> List[VernacElement]:
@@ -72,11 +72,12 @@ class RocqParser:
         result = self.client.run(state, 'Print LoadPath.', timeout=timeout)
         return parse_loadpath(result.feedback[0][1])
 
-    def extract_toc(self, source: Source, root:Optional[str]=None) -> Tuple[List[VernacElement], List[Diagnostic]]:
-        toc, diags = self.client.get_ast(source.path, root=root)
+    def extract_toc(self, source: Source, root:Optional[str]=None, force_dump=True) -> Tuple[List[VernacElement], List[Diagnostic]]:
+        toc, diags = self.client.get_ast(source.path, root=root, force_dump=force_dump)
         content_utf_8 = source.content.encode("utf-8")
         for entry in toc:
-            entry.data['content'] = content_utf_8[entry.span.bp:entry.span.ep].decode("utf-8")
+            if entry.span:
+                entry.data['content'] = content_utf_8[entry.span.bp:entry.span.ep].decode("utf-8")
         return toc, diags
 
     def scan_glob_for_hb(self, source: Source) -> Dict[str, VernacElement]:
@@ -105,7 +106,7 @@ class RocqParser:
         return result
     
     def ast(self, source: Source, root: Optional[Path]=None,check_hb=True) -> Tuple[List[VernacElement], List[VernacElement]]:
-        ast = self.client.get_ast(source.path, root=root)
+        ast, _ = self.client.get_ast(source.path, root=root)
     
         target_elements = []
         proof_elements = []
@@ -149,6 +150,8 @@ class RocqParser:
             if kind == VernacKind.EXTEND:
                 if check_hb and entry.name and entry.name.startswith('ElpiHB'):
                     span = entry.span
+                    if not span:
+                        continue
                     key = f"{span.bp}:{span.ep}"
                     if key in hb_candidates:
                         hb_entry = hb_candidates[key]
@@ -183,8 +186,8 @@ class RocqParser:
                     proof_elements.append(entry)
         return target_elements, proof_elements
 
-    def extract_proofs_raw(self, source: Source) -> List[Tuple[VernacElement, List[str]]]:
-        ast = self.client.get_ast(source.path)
+    @staticmethod
+    def extract_proofs_raw(source: Source, ast: List[VernacElement]) -> List[Tuple[VernacElement, List[str]]]:
         proof_open = False
         theorem_element = None
         steps = []
@@ -194,7 +197,9 @@ class RocqParser:
         for entry in ast:
             span = entry.span
             kind = entry.kind
-            subcontent = source.content_utf8[span.bp:span.ep].decode("utf-8")
+            subcontent = ""
+            if span:
+                subcontent = source.content_utf8[span.bp:span.ep].decode("utf-8")
             match kind:
                 case VernacKind.BEGIN_SECTION:
                     namespaces_stack.append(("SECTION", entry.name))
@@ -219,7 +224,7 @@ class RocqParser:
                 case VernacKind.END_PROOF:
                     if proof_open:
                         stack_modules = [el[1] for el in namespaces_stack if el[0] == 'MODULE']
-                        if not theorem_element.name:
+                        if not theorem_element or not theorem_element.name:
                             continue
                         stack_modules.append(theorem_element.name)
                         theorem_element.data['fqn'] = ".".join(stack_modules)
