@@ -12,9 +12,11 @@ dependencies = []
 
 [project.scripts]
 rocq-ml-server = "rocq_ml_toolbox.inference.cli:main"
+rocq-ml-safeverify = "rocq_ml_toolbox.safeverify.cli:main"
 
 [project.optional-dependencies]
 parser = []
+safeverify = ["pyyaml"]
 server = ["fastapi", "psutil", "redis", "requests", "uvicorn", "setproctitle"] # pytanque
 docker = ["docker", "pyyaml", "requests"]
 client = ["requests"]
