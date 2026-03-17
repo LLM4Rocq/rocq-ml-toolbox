@@ -17,7 +17,7 @@ rocq-ml-safeverify = "rocq_ml_toolbox.safeverify.cli:main"
 [project.optional-dependencies]
 parser = []
 safeverify = []
-server = ["fastapi", "psutil", "redis", "requests", "uvicorn", "setproctitle"] # pytanque
+server = ["fastapi", "psutil", "pyyaml", "redis", "requests", "uvicorn", "setproctitle"] # pytanque
 docker = ["docker", "pyyaml", "requests"]
 client = ["requests"]
 all = ["docker", "fastapi", "psutil", "pyyaml", "redis", "requests", "uvicorn", "setproctitle"]
@@ -28,6 +28,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+"rocq_ml_toolbox.inference" = ["logging_config.yaml"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
