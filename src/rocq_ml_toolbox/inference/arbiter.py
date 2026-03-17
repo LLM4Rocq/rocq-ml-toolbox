@@ -113,7 +113,6 @@ def _probe_pet_server(port: int, timeout: float = 2.0) -> bool:
     client = Pytanque("127.0.0.1", port, mode=PytanqueMode.SOCKET)
     try:
         client.connect()
-        client.set_workspace(debug=False, dir=os.getcwd(), timeout=max(timeout, 1.0))
         return True
     except Exception:
         return False
