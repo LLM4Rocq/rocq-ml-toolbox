@@ -99,8 +99,8 @@ class OpamDocker(BaseDocker):
     
     def _build_image(self, timeout_install=3600):
         """Create a container image for the requested packages if needed."""
-        
-        self.container = self.client.containers.run(
+
+        build_container = self.client.containers.run(
             self.config.base_image,
             detach=True,
             tty=False,
@@ -111,15 +111,22 @@ class OpamDocker(BaseDocker):
         )
 
         print('Build Image')
+        self.container = build_container
         signal.signal(signal.SIGALRM, BaseDocker._timeout_handler)
         signal.alarm(timeout_install)
-        if self.config.pins:
-            self.pin_project(" ".join(self.config.pins))
-        if self.config.packages:
-            self.install_project(" ".join(self.config.packages))
-        signal.alarm(0)
-
-        self.container.commit(self.config.name, self.config.tag)
+        try:
+            if self.config.pins:
+                self.pin_project(" ".join(self.config.pins))
+            if self.config.packages:
+                self.install_project(" ".join(self.config.packages))
+            build_container.commit(self.config.name, self.config.tag)
+        finally:
+            signal.alarm(0)
+            try:
+                self.kill_container(build_container)
+            except Exception:
+                pass
+            self.container = None
 
     def wait_redis_ready(self, port=6379, timeout=10.0, interval=0.1):
         """Wait until Redis answers PING with PONG."""
