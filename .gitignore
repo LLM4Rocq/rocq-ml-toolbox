@@ -6,10 +6,24 @@ __pycache__/
 # C extensions
 *.so
 
+
+# fcc
+*.proofdepsdump
+*.proofdepsdump.ast
+*.diags
+*.vok
+*.aux
+*.vos
+*.vo
+*.glob
+
 # Temporary files
 tests/.*
 stress_test_light
 *.log
+export/
+.lia.cache
+.vscode/
 
 # Distribution / packaging
 .Python
