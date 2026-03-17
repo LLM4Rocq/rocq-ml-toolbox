@@ -22,6 +22,7 @@ INCOMPLETE_PROOF_SNIPPETS = (
     "remaining open goals",
     "proof term is not complete",
 )
+ERROR_SEVERITY = 1
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,27 @@ def _is_incomplete_diag(message: str) -> bool:
     return any(pattern in msg for pattern in INCOMPLETE_PROOF_SNIPPETS)
 
 
+def _is_error_diag(diag: Diagnostic) -> bool:
+    return diag.severity == ERROR_SEVERITY
+
+
+def _diagnostic_to_json(diag: Diagnostic) -> dict[str, Any]:
+    return {
+        "severity": diag.severity,
+        "message": diag.message,
+        "range": {
+            "start": {
+                "line": diag.range.start.line,
+                "character": diag.range.start.character,
+            },
+            "end": {
+                "line": diag.range.end.line,
+                "character": diag.range.end.character,
+            },
+        },
+    }
+
+
 def _proof_bounds(proof: ProofEntry) -> tuple[tuple[int, int], tuple[int, int]]:
     start = _pos_tuple(proof.start_range.start.line, proof.start_range.start.character)
     if proof.steps:
@@ -75,6 +97,14 @@ def _proof_incomplete_diagnostics(proof: ProofEntry, diags: Sequence[Diagnostic]
     return result
 
 
+def _proof_error_diagnostics(proof: ProofEntry, diags: Sequence[Diagnostic]) -> list[Diagnostic]:
+    result: list[Diagnostic] = []
+    for diag in diags:
+        if _diag_overlaps_proof(diag, proof) and _is_error_diag(diag):
+            result.append(diag)
+    return result
+
+
 def _proof_has_admitted_step(proof: ProofEntry) -> bool:
     return any(_normalize_step(step.raw) == "Admitted." for step in proof.steps)
 
@@ -86,7 +116,7 @@ def _proof_has_self_axiom(proof: ProofEntry) -> bool:
 def _is_missing_obligation(proof: ProofEntry, diags: Sequence[Diagnostic]) -> bool:
     if _proof_has_admitted_step(proof):
         return True
-    return bool(_proof_incomplete_diagnostics(proof, diags))
+    return bool(_proof_error_diagnostics(proof, diags))
 
 
 def _extract_theorem_decls(ast: Sequence[VernacElement]) -> list[TheoremDecl]:
@@ -348,17 +378,29 @@ def _dep_allowed(dep: ProofDependency, allowed_axioms: set[str]) -> bool:
 def _target_proof_completeness(proof: ProofEntry, diags: Sequence[Diagnostic]) -> tuple[bool, dict[str, Any]]:
     details: dict[str, Any] = {}
 
-    if _proof_has_admitted_step(proof):
+    has_admitted_step = _proof_has_admitted_step(proof)
+    if has_admitted_step:
         details["has_admitted_step"] = True
 
-    incomplete_diags = _proof_incomplete_diagnostics(proof, diags)
-    if incomplete_diags:
-        details["diagnostics"] = incomplete_diags
+    overlapping_errors = _proof_error_diagnostics(proof, diags)
+    if overlapping_errors:
+        details["error_diagnostics"] = [_diagnostic_to_json(diag) for diag in overlapping_errors]
 
-    if _proof_has_self_axiom(proof):
+    # Reporting signal only: this is not a completeness gate.
+    incomplete_signals = _proof_incomplete_diagnostics(proof, diags)
+    if incomplete_signals:
+        details["incomplete_proof_signals"] = incomplete_signals
+
+    has_self_axiom = _proof_has_self_axiom(proof)
+    if has_self_axiom:
         details["has_self_axiom"] = True
 
-    return (not details), details
+    is_complete = not has_admitted_step and not overlapping_errors and not has_self_axiom
+    if is_complete:
+        # Keep output compact for successful proofs.
+        return True, {}
+
+    return False, details
 
 
 def _statement_harness(
