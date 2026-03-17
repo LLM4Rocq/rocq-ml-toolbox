@@ -7,7 +7,7 @@ import tempfile
 import json
 import logging
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Any
 from pytanque.client import RouteName, PetanqueError, Response
 from pytanque.protocol import Failure, Error
@@ -15,6 +15,7 @@ from pytanque.routes import PETANQUE_ROUTES
 from .sessions import SessionManager
 from ..parser.ast.driver import load_proof_dump
 from ..parser.glob.driver import load_glob_file
+from ..safeverify.core import run_safeverify
 
 logger = logging.getLogger("session")
 
@@ -99,6 +100,14 @@ class GetGlobBody(BaseModel):
     path: str
     force_compile: bool=False
 
+class SafeVerifyBody(BaseModel):
+    source: str
+    target: str
+    root: str
+    axiom_whitelist: list[str] = Field(default_factory=list)
+    save_path: Optional[str] = None
+    verbose: bool = False
+
 @app.post("/get_dump")
 def get_dump(body: GetAstBody):
     """
@@ -125,6 +134,21 @@ def get_glob(body: GetGlobBody):
     logging.info(f"get_glob: {body.path}")
     output = {"value": load_glob_file(body.path, force_compile=body.force_compile)}
     return output
+
+@app.post("/safeverify")
+def safeverify(body: SafeVerifyBody):
+    """
+    Run SafeVerify inside the server environment.
+    """
+    report = run_safeverify(
+        body.source,
+        body.target,
+        root=body.root,
+        axiom_whitelist=body.axiom_whitelist,
+        save_path=body.save_path,
+        verbose=body.verbose,
+    )
+    return report.to_json()
 
 @app.get("/empty_file")
 def empty_file():

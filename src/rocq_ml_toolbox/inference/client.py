@@ -1,7 +1,7 @@
 from pytanque import Pytanque, PytanqueMode
 import requests
 from pathlib import Path
-from typing import List, Optional, Union, Any, Self, Tuple
+from typing import List, Optional, Union, Any, Self, Tuple, Sequence
 
 from ..parser.diags.parser import Diagnostic
 from ..parser.ast.driver import parse_ast_dump, VernacElement
@@ -33,6 +33,28 @@ class PytanqueExtended(Pytanque):
         result = requests.get(url)
         path = result.json()['path']
         return path
+
+    def safeverify(
+        self,
+        source: Union[Path, str],
+        target: Union[Path, str],
+        root: Union[Path, str],
+        axiom_whitelist: Optional[Sequence[str]] = None,
+        save_path: Optional[Union[Path, str]] = None,
+        verbose: bool = False,
+    ) -> dict[str, Any]:
+        url = f"http://{self.host}:{self.port}/safeverify"
+        payload = {
+            "source": str(source),
+            "target": str(target),
+            "root": str(root),
+            "axiom_whitelist": list(axiom_whitelist or []),
+            "save_path": None if save_path is None else str(save_path),
+            "verbose": verbose,
+        }
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+        return response.json()
     
     def to_json(self) -> Any:
         return {
