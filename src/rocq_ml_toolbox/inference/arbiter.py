@@ -269,9 +269,6 @@ def _maybe_restart_pet_server(pet_idx: int) -> bool:
     if state != PetStatus.RESTART_NEEDED:
         return False
 
-    if _is_pet_locked(pet_idx):
-        return False
-
     print(f"[arbiter] Restart requested for pet_idx={pet_idx}", flush=True)
     return restart_single_pet_server(pet_idx)
 
