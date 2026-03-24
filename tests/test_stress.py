@@ -100,6 +100,44 @@ def try_proof(entry, host, port) -> bool:
         state = client.run(state, step, timeout=15)
     return True
 
+
+def try_timeout_replay_foo(
+    worker_id: int,
+    host: str,
+    port: int,
+    filepath: str,
+    start_barrier: threading.Barrier,
+) -> tuple[int, bool, str]:
+    with Pytanque(host, port, mode=PytanqueMode.HTTP, timeout_http=20 * 60) as client:
+        start_barrier.wait(timeout=30)
+        state = client.get_state_at_pos(filepath, 7, 0, timeout=60)
+
+        first_error = ""
+        try:
+            client.run(state, "vm_compute.", timeout=3)
+        except Exception as exc:
+            first_error = repr(exc)
+
+        if not first_error:
+            return worker_id, False, "expected timeout on first vm_compute."
+
+        deadline = time.time() + 30.0
+        last_error = ""
+        while time.time() < deadline:
+            try:
+                state = client.run(state, "idtac.", timeout=15)
+                client.goals(state, timeout=15)
+                return worker_id, True, ""
+            except Exception as exc:
+                last_error = repr(exc)
+                time.sleep(0.5)
+
+        return (
+            worker_id,
+            False,
+            f"recovery failed; first_error={first_error}; last_error={last_error}",
+        )
+
 @pytest.fixture(scope="session")
 def to_prove(parser: RocqParser, stdlib_filepaths: List[str]):
     cache_file = 'tests/pytest_toprove.json'
@@ -228,3 +266,31 @@ def test_replay(host, port, stress_workers, to_prove, stress_n, redis_url):
     finally:
         stop_event.set()
         coord_thread.join(timeout=1.0)
+
+
+@pytest.mark.replay
+def test_replay_timeout_foo_parallel(host, port, stress_workers, server):
+    assert server == "OK"
+    filepath = str(Path(__file__).resolve().parents[1] / "examples" / "foo.v")
+    workers = max(1, stress_workers)
+    start_barrier = threading.Barrier(workers)
+
+    failures = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [
+            ex.submit(
+                try_timeout_replay_foo,
+                worker_id,
+                host,
+                port,
+                filepath,
+                start_barrier,
+            )
+            for worker_id in range(workers)
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            worker_id, ok, message = future.result()
+            if not ok:
+                failures.append(f"worker {worker_id:02d}: {message}")
+
+    assert not failures, "\n".join(failures)
