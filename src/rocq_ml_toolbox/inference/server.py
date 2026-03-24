@@ -12,7 +12,7 @@ from typing import Optional, Any
 from pytanque.client import RouteName, PetanqueError, Response
 from pytanque.protocol import Failure, Error
 from pytanque.routes import PETANQUE_ROUTES
-from .sessions import SessionManager
+from .sessions import SessionManager, SessionManagerError
 from ..parser.ast.driver import load_proof_dump
 from ..parser.glob.driver import load_glob_file
 from ..safeverify.core import run_safeverify
@@ -85,6 +85,15 @@ def rpc_endpoint(body: JsonRpcBody, request: FastAPIRequest):
             body.id,
             Error(
                 e.code,
+                e.message
+            )
+        )
+    except SessionManagerError as e:
+        logging.error(f"[{body.session_id}] SessioManager error: {e.message}")
+        result = Failure(
+            body.id,
+            Error(
+                -30_000,
                 e.message
             )
         )

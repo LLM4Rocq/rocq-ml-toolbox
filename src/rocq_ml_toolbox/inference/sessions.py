@@ -330,7 +330,7 @@ class SessionManager:
         logging.info(f"[{session.id}] State inconsistency, replay mechanism ON.")
         for node in replay_session:
             logging.info(f"[{session.id}] REPLAY: {node.query_kwargs.params}")
-            state = mapping_state[node.state_key]
+            state = mapping_state.get(node.state_key, None)
                 
             # if state is outdated or None then regenerate it
             if not state or state.generation < current_generation:
