@@ -413,14 +413,13 @@ class SessionManager:
         current_generation = self.get_generation(session.pet_idx)
         if state.generation == current_generation:
             return state # No need to replay
-        worker = self._get_worker(session.pet_idx)
-
+        
         mapping_state = self.mapping_state_cache_update(state, session)
         if state in mapping_state:
             state_map = mapping_state[state]
             if state_map.generation == current_generation:
                 return state_map
-        
+        worker = self._get_worker(session.pet_idx)
         params_tree = self.params_tree_cache_update(state, session)
         lock.extend(self.timeout_eps, replace_ttl=False)
         replay_session = params_tree.find_path(state)
@@ -472,7 +471,7 @@ class SessionManager:
         session_id: str,
         route: Routes,
         params: Params
-    ) -> Iterator[Tuple[Session, Pytanque, Lock, Params]]:
+    ) -> Iterator[Tuple[Session, Lock, Params]]:
         self._maybe_evict_expired_sessions()
         try:
             session = Session.from_redis(session_id, self.redis_client)
@@ -498,9 +497,8 @@ class SessionManager:
                 self._evict_session(session_id)
                 raise SessionManagerError(f"Session {session_id} has expired.")
             self._touch_session(session)
-            worker = self._get_worker(session.pet_idx)
             updated_params = self._update_params(params, session, lock)
-            yield session, worker, lock, updated_params
+            yield session, lock, updated_params
 
         except PetanqueError as e:
             # if petanque error is related to a timeout, then send kill signal to the underlying pet server.
@@ -619,7 +617,7 @@ class SessionManager:
     ) -> Any:
         # TODO: set_workspace is not manage right now
         route = PETANQUE_ROUTES[route_name]
-        with self._pet_ctx(session_id, route, params=params) as (session, worker, lock, updated_params):
+        with self._pet_ctx(session_id, route, params=params) as (session, lock, updated_params):
             logging.info(f"[{session.id}] {route_name}: {params}")
 
             if not timeout:
@@ -628,6 +626,7 @@ class SessionManager:
                 ttl = timeout + self.timeout_eps
                 lock.extend(ttl, replace_ttl=True)
             logging.info(f"[{session.id}] {updated_params}")
+            worker = self._get_worker(session.pet_idx)
             query_res = worker.query(route_name, updated_params, timeout=timeout)
             logging.info(f"[{session.id}] {query_res}")
             if query_res is None:
