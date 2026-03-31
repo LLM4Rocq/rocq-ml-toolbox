@@ -8,6 +8,7 @@ from dataclasses import fields
 import logging
 import json
 import uuid
+import errno
 
 import redis.exceptions
 from pytanque import Pytanque, PetanqueError, PytanqueMode, Response
@@ -532,6 +533,15 @@ class SessionManager:
                 self.send_kill_signal(pet_idx)
                 logging.warning(f"[{session.id}] Kill signal send to {pet_idx} after {params}, cause: {e}")
             raise e
+        except OSError as e:
+            # if unknown issue then send kill signal to the underlying pet server.
+            if e.errno == errno.EBADF:
+                logging.warning(f"Hard max ram event?")
+                raise PetanqueError(-33000, "Caught bad file descriptor error: hard max ram event?")
+            else:
+                self.send_kill_signal(pet_idx)
+                logging.warning(f"[{session.id}] Kill signal send to {pet_idx} after {params}, cause: {e}")
+                raise e
         except Exception as e:
             # if unknown issue then send kill signal to the underlying pet server.
             self.send_kill_signal(pet_idx)

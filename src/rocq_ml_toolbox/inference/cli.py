@@ -148,7 +148,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("--num-pet-server", type=int, default=4)
     p.add_argument("--pet-server-start-port", type=int, default=8765)
     p.add_argument("--pet-server-cmd", type=str, default="pet-server")
-    p.add_argument("--max-ram-per-pet", type=int, default=6000, help="Maximum allowed ram usage in MB per pet-server process.")
+    p.add_argument("--soft-max-ram-per-pet", type=int, default=4000, help="Maximum allowed ram usage in MB per pet-server process (soft interruption).")
+    p.add_argument("--hard-max-ram-per-pet", type=int, default=6000, help="Maximum allowed ram usage in MB per pet-server process (hard interruption).")
     p.add_argument("--redis-port", type=int, default=6379)
     p.add_argument(
         "--session-ttl-seconds",
@@ -190,7 +191,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     env = os.environ.copy()
     env["NUM_PET_SERVER"] = str(args.num_pet_server)
     env["PET_SERVER_START_PORT"] = str(args.pet_server_start_port)
-    env["MAX_RAM_PER_PET"] = str(args.max_ram_per_pet)
+    env["SOFT_MAX_RAM_PER_PET"] = str(args.soft_max_ram_per_pet)
+    env["HARD_MAX_RAM_PER_PET"] = str(args.hard_max_ram_per_pet)
     env["REDIS_URL"] = redis_url
     env["PET_CMD"] = str(args.pet_server_cmd)
     env["SESSION_TTL_SECONDS"] = str(max(0, int(args.session_ttl_seconds)))

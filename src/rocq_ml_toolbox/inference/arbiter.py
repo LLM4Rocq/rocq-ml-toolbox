@@ -33,7 +33,9 @@ from .redis_keys import (
 
 NUM_PET_SERVER = int(os.environ["NUM_PET_SERVER"])
 PET_SERVER_START_PORT = int(os.environ["PET_SERVER_START_PORT"])
-MAX_RAM_PER_PET = int(os.environ["MAX_RAM_PER_PET"])  # MB; 0 disables RAM checks
+SOFT_MAX_RAM_PER_PET = int(os.environ["SOFT_MAX_RAM_PER_PET"], "4000")  # MB; 0 disables RAM checks
+HARD_MAX_RAM_PER_PET = int(os.environ["HARD_MAX_RAM_PER_PET"], "6000")  # MB; 0 disables RAM checks
+
 REDIS_URL = os.environ["REDIS_URL"]
 PET_CMD = os.environ.get("PET_CMD", "pet-server")
 
@@ -273,11 +275,11 @@ def _maybe_restart_pet_server(pet_idx: int) -> bool:
     return restart_single_pet_server(pet_idx)
 
 
-def check_ram(pet_idx: int) -> None:
+def check_ram(pet_idx: int, limit: float) -> None:
     """Monitor RAM usage and schedule restart when worker exceeds threshold."""
     with pet_servers_lock:
         p = pet_servers[pet_idx]
-    if p is None or MAX_RAM_PER_PET <= 0:
+    if p is None or limit <= 0:
         return
 
     if p.poll() is not None:
@@ -287,7 +289,7 @@ def check_ram(pet_idx: int) -> None:
     try:
         proc = psutil.Process(p.pid)
         rss_mb = proc.memory_info().rss / (1024 * 1024)
-        if rss_mb > MAX_RAM_PER_PET:
+        if rss_mb > limit:
             current_status = _get_pet_status(pet_idx)
             if current_status not in (
                 PetStatus.RESTART_NEEDED,
@@ -295,7 +297,7 @@ def check_ram(pet_idx: int) -> None:
             ):
                 print(
                     f"[arbiter] pet-server idx={pet_idx} over RAM limit: "
-                    f"{rss_mb:.1f} MB > {MAX_RAM_PER_PET} MB; scheduling restart",
+                    f"{rss_mb:.1f} MB > {limit} MB; scheduling restart",
                     flush=True,
                 )
                 _set_pet_status(pet_idx, PetStatus.RESTART_NEEDED)
@@ -306,49 +308,20 @@ def check_ram(pet_idx: int) -> None:
         )
     return
 
-# def monitor_ram(poll_interval: float = RAM_MONITOR_INTERVAL) -> None:
-#     """Monitor RAM usage and schedule restart when worker exceeds threshold."""
-#     print("[arbiter] RAM monitor started", flush=True)
+def monitor_ram() -> None:
+    """Monitor RAM usage and schedule restart when worker exceeds threshold."""
+    print("[arbiter] RAM monitor started", flush=True)
 
-#     while not _stop_event.is_set():
-#         try:
-#             for pet_idx in range(NUM_PET_SERVER):
-#                 with pet_servers_lock:
-#                     p = pet_servers[pet_idx]
-#                 if p is None or MAX_RAM_PER_PET <= 0:
-#                     continue
+    while not _stop_event.is_set():
+        try:
+            for pet_idx in range(NUM_PET_SERVER):
+                check_ram(pet_idx, HARD_MAX_RAM_PER_PET)
+            time.sleep(RAM_MONITOR_INTERVAL)
+        except Exception as exc:
+            print(f"[arbiter] Error in RAM monitor: {exc}", flush=True)
+            time.sleep(RAM_MONITOR_INTERVAL)
 
-#                 if p.poll() is not None:
-#                     _set_pet_status(pet_idx, PetStatus.RESTART_NEEDED)
-#                     continue
-
-#                 try:
-#                     proc = psutil.Process(p.pid)
-#                     rss_mb = proc.memory_info().rss / (1024 * 1024)
-#                     if rss_mb > MAX_RAM_PER_PET:
-#                         current_status = _get_pet_status(pet_idx)
-#                         if current_status not in (
-#                             PetStatus.RESTART_NEEDED,
-#                             PetStatus.RESTARTING,
-#                         ):
-#                             print(
-#                                 f"[arbiter] pet-server idx={pet_idx} over RAM limit: "
-#                                 f"{rss_mb:.1f} MB > {MAX_RAM_PER_PET} MB; scheduling restart",
-#                                 flush=True,
-#                             )
-#                             _set_pet_status(pet_idx, PetStatus.RESTART_NEEDED)
-#                 except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-#                     print(
-#                         f"[arbiter] RAM check failed for pet_idx={pet_idx}: {exc}",
-#                         flush=True,
-#                     )
-
-#             time.sleep(poll_interval)
-#         except Exception as exc:
-#             print(f"[arbiter] Error in RAM monitor: {exc}", flush=True)
-#             time.sleep(poll_interval)
-
-#     print("[arbiter] RAM monitor exit", flush=True)
+    print("[arbiter] RAM monitor exit", flush=True)
 
 
 def monitor_redis_for_restarts(pet_idx: int) -> None:
@@ -367,7 +340,7 @@ def monitor_redis_for_restarts(pet_idx: int) -> None:
                 if not msg or msg.get("type") != "message":
                     continue
                 else:
-                    check_ram(pet_idx)
+                    check_ram(pet_idx, SOFT_MAX_RAM_PER_PET)
                 req = json.loads(msg["data"])
                 reply_channel = req.get("reply_to")
                 req_id = req.get("id")
@@ -435,9 +408,9 @@ def main() -> None:
     kill_all_pet(proc_name=os.path.basename(PET_CMD))
     start_pet_servers()
 
-    # t = threading.Thread(target=monitor_ram, daemon=True)
-    # t.start()
-    # monitor_threads.append(t)
+    t = threading.Thread(target=monitor_ram, daemon=True)
+    t.start()
+    monitor_threads.append(t)
 
     for pet_idx in range(NUM_PET_SERVER):
         t = threading.Thread(
