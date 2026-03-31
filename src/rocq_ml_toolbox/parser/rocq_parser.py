@@ -15,6 +15,7 @@ from .glob.parser import GlobDefinition, GlobKind
 from .ast.model import VernacKind, VernacElement, Span
 from .parser import Source, Theorem, ParserError, Step
 from .diags.parser import Diagnostic
+from .proof.parser import ProofDump
 
 from pytanque import PetanqueError
 from ..inference.client import PytanqueExtended
@@ -72,13 +73,13 @@ class RocqParser:
         result = self.client.run(state, 'Print LoadPath.', timeout=timeout)
         return parse_loadpath(result.feedback[0][1])
 
-    def extract_toc(self, source: Source, root:Optional[str]=None, force_dump=True) -> Tuple[List[VernacElement], List[Diagnostic]]:
-        _, toc, diags = self.client.get_dump(source.path, root=root, force_dump=force_dump)
+    def extract_dump(self, source: Source, root:Optional[str]=None, force_dump=True) -> Tuple[ProofDump, List[VernacElement], List[Diagnostic]]:
+        proofs, toc, diags = self.client.get_dump(source.path, root=root, force_dump=force_dump)
         content_utf_8 = source.content.encode("utf-8")
         for entry in toc:
             if entry.span:
                 entry.data['content'] = content_utf_8[entry.span.bp:entry.span.ep].decode("utf-8")
-        return toc, diags
+        return proofs, toc, diags
 
     def scan_glob_for_hb(self, source: Source) -> Dict[str, VernacElement]:
         glob = self.client.get_glob(source.path)
