@@ -98,6 +98,12 @@ def terminate_process(proc: subprocess.Popen, timeout_s: float = 5.0) -> None:
 def redis_url_from_port(port: int) -> str:
     return f"redis://127.0.0.1:{port}/0"
 
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
 
 def wait_for_redis(redis_client: redis.Redis, timeout_s: float = 15.0) -> bool:
     deadline = time.monotonic() + timeout_s
@@ -144,6 +150,24 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("--pet-server-cmd", type=str, default="pet-server")
     p.add_argument("--max-ram-per-pet", type=int, default=6000, help="Maximum allowed ram usage in MB per pet-server process.")
     p.add_argument("--redis-port", type=int, default=6379)
+    p.add_argument(
+        "--session-ttl-seconds",
+        type=int,
+        default=int(os.environ.get("SESSION_TTL_SECONDS", str(30 * 60))),
+        help="Session inactivity TTL in seconds before eviction.",
+    )
+    p.add_argument(
+        "--session-cache-keep-feedback",
+        action="store_true",
+        default=env_bool("SESSION_CACHE_KEEP_FEEDBACK", default=False),
+        help="Keep State.feedback in server-side caches (disabled by default).",
+    )
+    p.add_argument(
+        "--session-cleanup-interval-seconds",
+        type=int,
+        default=int(os.environ.get("SESSION_CLEANUP_INTERVAL_SECONDS", "60")),
+        help="How often to scan and evict expired sessions.",
+    )
     p.add_argument("--app", default=DEFAULT_APP)
     p.add_argument("--config", default=DEFAULT_CONFIG)
 
@@ -168,7 +192,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     env["PET_SERVER_START_PORT"] = str(args.pet_server_start_port)
     env["MAX_RAM_PER_PET"] = str(args.max_ram_per_pet)
     env["REDIS_URL"] = redis_url
-    env["PET_CMD"] = str(args.pet_server_cmd)    
+    env["PET_CMD"] = str(args.pet_server_cmd)
+    env["SESSION_TTL_SECONDS"] = str(max(0, int(args.session_ttl_seconds)))
+    env["SESSION_CACHE_KEEP_FEEDBACK"] = "1" if args.session_cache_keep_feedback else "0"
+    env["SESSION_CLEANUP_INTERVAL_SECONDS"] = str(max(1, int(args.session_cleanup_interval_seconds)))
     
     first_pet_port = args.pet_server_start_port
     all_required_ports = list(range(first_pet_port, first_pet_port+ args.num_pet_server))

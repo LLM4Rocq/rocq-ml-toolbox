@@ -19,6 +19,12 @@ from ..safeverify.core import run_safeverify
 
 logger = logging.getLogger("session")
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
 class JsonRpcBody(BaseModel):
     jsonrpc: str = "2.0"
     id: int
@@ -32,11 +38,17 @@ async def lifespan(app: FastAPI):
     NUM_PET_SERVER = int(os.environ["NUM_PET_SERVER"])
     PET_SERVER_START_PORT = int(os.environ["PET_SERVER_START_PORT"])
     REDIS_URL = os.environ["REDIS_URL"]
+    SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", str(30 * 60)))
+    SESSION_CACHE_KEEP_FEEDBACK = _env_bool("SESSION_CACHE_KEEP_FEEDBACK", default=False)
+    SESSION_CLEANUP_INTERVAL_SECONDS = int(os.environ.get("SESSION_CLEANUP_INTERVAL_SECONDS", "60"))
 
     sm = SessionManager(
         redis_url=REDIS_URL,
         pet_server_start_port=PET_SERVER_START_PORT,
-        num_pet_server=NUM_PET_SERVER
+        num_pet_server=NUM_PET_SERVER,
+        session_ttl_s=SESSION_TTL_SECONDS,
+        cache_feedback=SESSION_CACHE_KEEP_FEEDBACK,
+        session_cleanup_interval_s=SESSION_CLEANUP_INTERVAL_SECONDS,
     )
     app.state.sm = sm
     yield
