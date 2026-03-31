@@ -14,6 +14,12 @@ def session_key(session_id: str) -> str:
 def mapping_state_key(session_id: str) -> str:
     return f"mapping_state:{session_id}"
 
+def mapping_tree_key(session_id: str) -> str:
+    return f"mapping_tree:{session_id}"
+
+def params_tree_key(session_id: str, tree_id: str) -> str:
+    return f"params_tree:{session_id}:{tree_id}"
+
 def tactics_tree_key(session_id: str) -> str:
     return f"tactics_tree_key:{session_id}"
 
@@ -50,6 +56,8 @@ def arbiter_heartbeat_key() -> str:
 ALL_KEYS_STAR = [
     session_key('*'),
     mapping_state_key('*'),
+    mapping_tree_key('*'),
+    params_tree_key('*', '*'),
     tactics_tree_key('*'),
     pet_status_key('*'),
     generation_key('*'),

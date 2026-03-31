@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
+import time
 import json
 from typing import List, Union, Any, Dict, Optional, Self
 import uuid
@@ -13,9 +14,9 @@ def state_to_state_key(state: State) -> str:
     
 class RedisSessionSerializable(ABC):
     redis_key: str
-    def to_redis(self, session: Session, redis: Redis) -> None:
+    def to_redis(self, session: Session, redis: Redis, ex: Optional[int] = None) -> None:
         key = f"{self.redis_key}:{session.id}"
-        redis.set(key, json.dumps(self.to_json()))
+        redis.set(key, json.dumps(self.to_json()), ex=ex)
 
     @classmethod
     def from_redis(
@@ -33,9 +34,9 @@ class RedisIDSerializable(ABC):
     redis_key: str
     id: str
 
-    def to_redis(self, session: Session, redis: Redis) -> None:
+    def to_redis(self, session: Session, redis: Redis, ex: Optional[int] = None) -> None:
         key = f"{self.redis_key}:{session.id}:{self.id}"
-        redis.set(key, json.dumps(self.to_json()))
+        redis.set(key, json.dumps(self.to_json()), ex=ex)
 
     @classmethod
     def from_redis(
@@ -216,25 +217,37 @@ class MappingTree(RedisSessionSerializable):
         self.mapping[state_key] = params_tree.id
 
     @classmethod
-    def add_get_remote(cls, state_or_key: Union[State, str], params_tree: ParamsTree, session: Session, redis: Redis) -> MappingTree:
+    def add_get_remote(
+        cls,
+        state_or_key: Union[State, str],
+        params_tree: ParamsTree,
+        session: Session,
+        redis: Redis,
+        ex: Optional[int] = None,
+    ) -> MappingTree:
         mapping_tree = MappingTree.from_redis(session, redis)
         mapping_tree.add(state_or_key, params_tree)
-        mapping_tree.to_redis(session, redis)
+        mapping_tree.to_redis(session, redis, ex=ex)
         return mapping_tree
 
 @dataclass
 class Session(RedisSessionSerializable):
     pet_idx: int                       # which pet-server index (0..num_pet_server-1)
     profile: str = "default"
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     redis_key = "session"
 
     @classmethod
     def from_json(cls, raw: Dict[str, Any]) -> Session:
+        now = time.time()
         return cls(
             id=raw["id"],
             pet_idx=raw["pet_idx"],
             profile=raw.get("profile", "default"),
+            created_at=float(raw.get("created_at", now)),
+            updated_at=float(raw.get("updated_at", now)),
         )
 
     def to_json(self) -> dict:
@@ -242,11 +255,13 @@ class Session(RedisSessionSerializable):
             "id": self.id,
             "pet_idx": self.pet_idx,
             "profile": self.profile,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
     
-    def to_redis(self, redis: Redis) -> None:
+    def to_redis(self, redis: Redis, ex: Optional[int] = None) -> None:
         key = f"{self.redis_key}:{self.id}"
-        redis.set(key, json.dumps(self.to_json()))
+        redis.set(key, json.dumps(self.to_json()), ex=ex)
 
     @classmethod
     def from_redis(

@@ -23,7 +23,11 @@ from .redis_keys import (
     generation_key,
     pet_lock_key,
     archived_sessions_key,
-    session_assigned_idx_key
+    session_assigned_idx_key,
+    session_key,
+    mapping_state_key,
+    mapping_tree_key,
+    params_tree_key,
 )
 from .session_model import ParamsTree, MappingState, MappingTree, Session, State, QueryKwargs
 
@@ -69,7 +73,17 @@ class SessionManagerError(Exception):
 
 class SessionManager:
 
-    def __init__(self, redis_url: str, pet_server_start_port: int=8765, num_pet_server: int=4, timeout_ok: int=15, timeout_eps: int=10):
+    def __init__(
+        self,
+        redis_url: str,
+        pet_server_start_port: int = 8765,
+        num_pet_server: int = 4,
+        timeout_ok: int = 15,
+        timeout_eps: int = 10,
+        session_ttl_s: int = 30 * 60,
+        cache_feedback: bool = False,
+        session_cleanup_interval_s: int = 60,
+    ):
         self.redis_client = redis.Redis.from_url(redis_url)
         self.ports = [pet_server_start_port + k for k in range(num_pet_server)]
         self.pytanques: List[Optional[Pytanque]] = [None] * num_pet_server
@@ -81,6 +95,88 @@ class SessionManager:
         self.num_pet_server = num_pet_server
         self.timeout_ok = timeout_ok
         self.timeout_eps = timeout_eps
+        self.session_ttl_s = max(0, int(session_ttl_s))
+        self.cache_feedback = bool(cache_feedback)
+        self.session_cleanup_interval_s = max(1, int(session_cleanup_interval_s))
+        self._next_session_cleanup_at = 0.0
+
+    def _drop_session_from_local_caches(self, session_id: str) -> None:
+        self.sessions_cache.pop(session_id, None)
+        self.mappings_state_cache.pop(session_id, None)
+        self.mappings_tree_cache.pop(session_id, None)
+        self.params_trees_cache.pop(session_id, None)
+
+    def _strip_feedback_from_state(self, state: State) -> State:
+        cached_state = State.from_json(state.to_json())
+        if not self.cache_feedback:
+            cached_state.feedback = []
+        return cached_state
+
+    def _strip_feedback_from_params(self, params: Params) -> Params:
+        cached_params = params.from_json(params.to_json())
+        if self.cache_feedback:
+            return cached_params
+        for field in fields(cached_params):
+            value = getattr(cached_params, field.name)
+            if isinstance(value, State):
+                value.feedback = []
+        return cached_params
+
+    def _touch_session(self, session: Session) -> None:
+        now = time.time()
+        if session.created_at <= 0:
+            session.created_at = now
+        session.updated_at = now
+        self.sessions_cache[session.id] = session
+        session.to_redis(self.redis_client)
+
+    def _evict_session(self, session_id: str) -> None:
+        raw_mapping_tree = self.redis_client.get(mapping_tree_key(session_id))
+        tree_ids: set[str] = set()
+        if raw_mapping_tree is not None:
+            try:
+                mapping_tree = MappingTree.from_json(json.loads(raw_mapping_tree))
+                tree_ids = set(mapping_tree.mapping.values())
+            except Exception:
+                tree_ids = set()
+
+        pipeline = self.redis_client.pipeline()
+        pipeline.delete(session_key(session_id))
+        pipeline.delete(mapping_state_key(session_id))
+        pipeline.delete(mapping_tree_key(session_id))
+        for tree_id in tree_ids:
+            pipeline.delete(params_tree_key(session_id, tree_id))
+        for raw_key in self.redis_client.scan_iter(params_tree_key(session_id, "*")):
+            pipeline.delete(raw_key)
+        pipeline.execute()
+        self._drop_session_from_local_caches(session_id)
+
+    def _maybe_evict_expired_sessions(self) -> None:
+        if self.session_ttl_s <= 0:
+            return
+
+        now = time.time()
+        if now < self._next_session_cleanup_at:
+            return
+        self._next_session_cleanup_at = now + self.session_cleanup_interval_s
+        cutoff_ts = now - self.session_ttl_s
+
+        for raw_key in self.redis_client.scan_iter(session_key("*")):
+            key = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
+            raw_session = self.redis_client.get(key)
+            if raw_session is None:
+                continue
+            try:
+                session = Session.from_json(json.loads(raw_session))
+            except Exception:
+                continue
+            if session.updated_at <= cutoff_ts:
+                self._evict_session(session.id)
+
+    def _session_is_expired(self, session: Session) -> bool:
+        if self.session_ttl_s <= 0:
+            return False
+        return (time.time() - session.updated_at) > self.session_ttl_s
 
     def get_generation(self, pet_idx: int) -> int:
         data = self.redis_client.get(generation_key(pet_idx))
@@ -231,6 +327,7 @@ class SessionManager:
 
     def create_session(self) -> str:
         """Create a new session with load-balanced pet-server assignment."""
+        self._maybe_evict_expired_sessions()
         assigned_idx = int(self.redis_client.incr(session_assigned_idx_key()))
         assigned_idx = assigned_idx % self.num_pet_server
         session = Session(pet_idx=assigned_idx)
@@ -242,7 +339,7 @@ class SessionManager:
         self.mappings_tree_cache[session.id] = mapping_tree
         self.params_trees_cache[session.id] = {}
 
-        session.to_redis(self.redis_client)
+        self._touch_session(session)
         mapping_state.to_redis(session, self.redis_client)
         mapping_tree.to_redis(session, self.redis_client)
         return session.id
@@ -345,7 +442,7 @@ class SessionManager:
                 route = PETANQUE_ROUTES[query_kwargs.route_name]
                 state = route.extract_response(query_res)
                 state.generation = current_generation
-                mapping_state.add(node.state_key, state)
+                mapping_state.add(node.state_key, self._strip_feedback_from_state(state))
         mapping_state.to_redis(session,self.redis_client)
         return state
     
@@ -376,7 +473,15 @@ class SessionManager:
         route: Routes,
         params: Params
     ) -> Iterator[Tuple[Session, Pytanque, Lock, Params]]:
-        session = Session.from_redis(session_id, self.redis_client)
+        self._maybe_evict_expired_sessions()
+        try:
+            session = Session.from_redis(session_id, self.redis_client)
+        except Exception as exc:
+            self._drop_session_from_local_caches(session_id)
+            raise SessionManagerError(f"Session {session_id} not found or expired.") from exc
+        if self._session_is_expired(session):
+            self._evict_session(session_id)
+            raise SessionManagerError(f"Session {session_id} has expired.")
         pet_idx = session.pet_idx
         lock: Optional[Lock] = None
         try:
@@ -384,7 +489,15 @@ class SessionManager:
             SessionManager._extend_lock_infinity(lock)
             self.ensure_pet_ok(pet_idx, timeout=self.timeout_ok)
             # in rare cases pet server may have crashed between the first `from_redis`, and the Lock acquire
-            session = Session.from_redis(session_id, self.redis_client)
+            try:
+                session = Session.from_redis(session_id, self.redis_client)
+            except Exception as exc:
+                self._drop_session_from_local_caches(session_id)
+                raise SessionManagerError(f"Session {session_id} not found or expired.") from exc
+            if self._session_is_expired(session):
+                self._evict_session(session_id)
+                raise SessionManagerError(f"Session {session_id} has expired.")
+            self._touch_session(session)
             worker = self._get_worker(session.pet_idx)
             updated_params = self._update_params(params, session, lock)
             yield session, worker, lock, updated_params
@@ -443,6 +556,7 @@ class SessionManager:
     ) -> None:
         state = route.extract_response(res)
         state.generation = gen
+        state_for_cache = self._strip_feedback_from_state(state)
 
         parent_state = route.extract_parent(params)
         mapping_tree = self.mapping_tree_cache_update(parent_state, session)
@@ -452,12 +566,17 @@ class SessionManager:
         parent_node = params_tree.find_node(parent_state)
 
         # we keep track of "old" client side params/state
-        query_args = QueryKwargs(route_name, params, timeout=timeout)
-        child = ParamsTree.from_state(state, query_args)
+        query_args = QueryKwargs(route_name, self._strip_feedback_from_params(params), timeout=timeout)
+        child = ParamsTree.from_state(state_for_cache, query_args)
         parent_node.add_child(child)
         params_tree.to_redis(session, self.redis_client)
 
-        self.mappings_tree_cache[session.id] = MappingTree.add_get_remote(state, params_tree, session, self.redis_client)
+        self.mappings_tree_cache[session.id] = MappingTree.add_get_remote(
+            state_for_cache,
+            params_tree,
+            session,
+            self.redis_client,
+        )
         return state
 
     @_after_pet_call.register
@@ -476,12 +595,18 @@ class SessionManager:
     ) -> None:
         state = route.extract_response(res)
         state.generation = gen
+        state_for_cache = self._strip_feedback_from_state(state)
         
-        query_args = QueryKwargs(route_name, params, timeout=timeout)
-        params_tree = ParamsTree.from_state(state, query_args)
+        query_args = QueryKwargs(route_name, self._strip_feedback_from_params(params), timeout=timeout)
+        params_tree = ParamsTree.from_state(state_for_cache, query_args)
         params_tree.to_redis(session, self.redis_client)
         
-        self.mappings_tree_cache[session.id] = MappingTree.add_get_remote(state, params_tree, session, self.redis_client)
+        self.mappings_tree_cache[session.id] = MappingTree.add_get_remote(
+            state_for_cache,
+            params_tree,
+            session,
+            self.redis_client,
+        )
         return state
     
     def _pet_call(
