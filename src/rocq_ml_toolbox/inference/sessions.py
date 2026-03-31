@@ -1,4 +1,5 @@
 from __future__ import annotations
+import socket
 import time
 from typing import List, Optional, Dict, Tuple, Any, Iterator, cast
 from contextlib import contextmanager
@@ -184,18 +185,38 @@ class SessionManager:
             raise SessionManagerError(f"No generation key related to pet-server at {pet_idx}")
         return int(data)
 
+    def _worker_socket_alive(self, worker: Optional[Pytanque]) -> bool:
+        if worker is None:
+            return False
+        sock = getattr(worker, "socket", None)
+        if sock is None:
+            return False
+        try:
+            if sock.fileno() < 0:
+                return False
+            sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            return True
+        except Exception:
+            return False
+
     @log_timing()
     def _get_worker(self, pet_idx: int) -> Pytanque:
         """Return a connected Pytanque client for pet_idx, recreating if generation changed."""
         current_gen = self.get_generation(pet_idx)
         worker = self.pytanques[pet_idx]
-        if worker is not None and self.worker_generations[pet_idx] == current_gen:
+        if (
+            worker is not None
+            and self.worker_generations[pet_idx] == current_gen
+            and self._worker_socket_alive(worker)
+        ):
             return worker
         if worker is not None:
             try:
                 worker.close()
             except Exception:
                 pass
+            self.pytanques[pet_idx] = None
+            self.worker_generations[pet_idx] = None
 
         worker = Pytanque("127.0.0.1", self.ports[pet_idx], mode=PytanqueMode.SOCKET)
         worker.connect()
