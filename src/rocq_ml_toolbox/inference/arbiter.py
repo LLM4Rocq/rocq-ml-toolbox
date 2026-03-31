@@ -33,8 +33,8 @@ from .redis_keys import (
 
 NUM_PET_SERVER = int(os.environ["NUM_PET_SERVER"])
 PET_SERVER_START_PORT = int(os.environ["PET_SERVER_START_PORT"])
-SOFT_MAX_RAM_PER_PET = int(os.environ["SOFT_MAX_RAM_PER_PET"], "4000")  # MB; 0 disables RAM checks
-HARD_MAX_RAM_PER_PET = int(os.environ["HARD_MAX_RAM_PER_PET"], "6000")  # MB; 0 disables RAM checks
+SOFT_MAX_RAM_PER_PET = int(os.environ.get("SOFT_MAX_RAM_PER_PET", "4000"))  # MB; 0 disables RAM checks
+HARD_MAX_RAM_PER_PET = int(os.environ.get("HARD_MAX_RAM_PER_PET", "6000"))  # MB; 0 disables RAM checks
 
 REDIS_URL = os.environ["REDIS_URL"]
 PET_CMD = os.environ.get("PET_CMD", "pet-server")
