@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import time
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -46,6 +47,11 @@ class FakeRedis:
     def get(self, key: str) -> Any:
         return self.store.get(key)
 
+    def incr(self, key: str) -> int:
+        value = int(self.store.get(key, 0)) + 1
+        self.store[key] = value
+        return value
+
     def delete(self, key: str) -> None:
         self.store.pop(key, None)
 
@@ -78,6 +84,26 @@ class FakeRedis:
             "blocking_timeout": blocking_timeout,
         }
         return FakeLock()
+
+    def pipeline(self):
+        return FakePipeline(self)
+
+
+class FakePipeline:
+    def __init__(self, redis: FakeRedis):
+        self.redis = redis
+        self._ops: list[tuple[str, Any]] = []
+
+    def delete(self, key: str):
+        self._ops.append(("delete", key))
+        return self
+
+    def execute(self):
+        for op, key in self._ops:
+            if op == "delete":
+                self.redis.delete(key)
+        self._ops.clear()
+        return []
 
 
 class FakeLock:
@@ -248,3 +274,82 @@ def test_server_health_endpoint_reflects_session_manager_snapshot():
         )
     )
     assert server.health(healthy_req) == healthy
+
+
+def test_session_manager_strips_feedback_from_cached_state_by_default(monkeypatch):
+    from rocq_ml_toolbox.inference import sessions
+    from pytanque.protocol import State, RunParams
+
+    fake_redis = FakeRedis()
+    monkeypatch.setattr(sessions.redis.Redis, "from_url", lambda _: fake_redis)
+
+    sm = sessions.SessionManager("redis://unused", num_pet_server=1)
+    state = State(st=42, proof_finished=False, feedback=[(0, "some feedback")], generation=0)
+    cleaned_state = sm._strip_feedback_from_state(state)
+    assert state.feedback == [(0, "some feedback")]
+    assert cleaned_state.feedback == []
+
+    params = RunParams(st=state, tac="idtac.")
+    cleaned_params = sm._strip_feedback_from_params(params)
+    assert params.st.feedback == [(0, "some feedback")]
+    assert cleaned_params.st.feedback == []
+
+    sm_keep = sessions.SessionManager("redis://unused", num_pet_server=1, cache_feedback=True)
+    kept_state = sm_keep._strip_feedback_from_state(state)
+    kept_params = sm_keep._strip_feedback_from_params(params)
+    assert kept_state.feedback == state.feedback
+    assert kept_params.st.feedback == state.feedback
+
+
+def test_session_manager_evicts_expired_session_and_related_keys(monkeypatch):
+    from rocq_ml_toolbox.inference import sessions
+    from rocq_ml_toolbox.inference.redis_keys import (
+        mapping_state_key,
+        mapping_tree_key,
+        params_tree_key,
+        session_key,
+    )
+
+    fake_redis = FakeRedis()
+    monkeypatch.setattr(sessions.redis.Redis, "from_url", lambda _: fake_redis)
+
+    sm = sessions.SessionManager(
+        "redis://unused",
+        num_pet_server=1,
+        session_ttl_s=60,
+        session_cleanup_interval_s=1,
+    )
+    session_id = sm.create_session()
+    tree_id = "tree-id-a"
+    fake_redis.set(
+        mapping_tree_key(session_id),
+        json.dumps({"mapping": {"0:1": tree_id}}),
+    )
+    fake_redis.set(params_tree_key(session_id, tree_id), json.dumps({"children": []}))
+
+    raw_session = json.loads(fake_redis.get(session_key(session_id)))
+    raw_session["updated_at"] = time.time() - 120
+    fake_redis.set(session_key(session_id), json.dumps(raw_session))
+
+    sm._next_session_cleanup_at = 0.0
+    sm._maybe_evict_expired_sessions()
+
+    assert fake_redis.get(session_key(session_id)) is None
+    assert fake_redis.get(mapping_state_key(session_id)) is None
+    assert fake_redis.get(mapping_tree_key(session_id)) is None
+    assert fake_redis.get(params_tree_key(session_id, tree_id)) is None
+    assert session_id not in sm.sessions_cache
+    assert session_id not in sm.mappings_state_cache
+    assert session_id not in sm.mappings_tree_cache
+    assert session_id not in sm.params_trees_cache
+
+
+def test_redis_cleanup_patterns_include_mapping_and_params_tree_keys():
+    from rocq_ml_toolbox.inference.redis_keys import (
+        ALL_KEYS_STAR,
+        mapping_tree_key,
+        params_tree_key,
+    )
+
+    assert mapping_tree_key("*") in ALL_KEYS_STAR
+    assert params_tree_key("*", "*") in ALL_KEYS_STAR
