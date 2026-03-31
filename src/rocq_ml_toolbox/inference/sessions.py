@@ -492,7 +492,7 @@ class SessionManager:
         session_id: str,
         route: Routes,
         params: Params
-    ) -> Iterator[Tuple[Session, Lock, Params]]:
+    ) -> Iterator[Tuple[Session, Params]]:
         self._maybe_evict_expired_sessions()
         try:
             session = Session.from_redis(session_id, self.redis_client)
@@ -519,7 +519,7 @@ class SessionManager:
                 raise SessionManagerError(f"Session {session_id} has expired.")
             self._touch_session(session)
             updated_params = self._update_params(params, session, lock)
-            yield session, lock, updated_params
+            yield session, updated_params
 
         except PetanqueError as e:
             # if petanque error is related to a timeout, then send kill signal to the underlying pet server.
@@ -638,14 +638,14 @@ class SessionManager:
     ) -> Any:
         # TODO: set_workspace is not manage right now
         route = PETANQUE_ROUTES[route_name]
-        with self._pet_ctx(session_id, route, params=params) as (session, lock, updated_params):
+        with self._pet_ctx(session_id, route, params=params) as (session, updated_params):
             logging.info(f"[{session.id}] {route_name}: {params}")
 
-            if not timeout:
-                SessionManager._extend_lock_infinity(lock)
-            else:
-                ttl = timeout + self.timeout_eps
-                lock.extend(ttl, replace_ttl=True)
+            # if not timeout:
+            #     SessionManager._extend_lock_infinity(lock)
+            # else:
+            #     ttl = timeout + self.timeout_eps
+            #     lock.extend(ttl, replace_ttl=True)
             logging.info(f"[{session.id}] {updated_params}")
             worker = self._get_worker(session.pet_idx)
             query_res = worker.query(route_name, updated_params, timeout=timeout)
