@@ -15,5 +15,5 @@ Theorem putnam_1966_a6
     (a : nat -> (nat -> R))
     (ha : forall n : nat, ge n 1 ->
         a n n = n%:R /\ (forall m : nat, ge m 1 -> lt m n -> a n m = m%:R * (@Num.sqrt R (1 + a n (S m)))))
-    : (fun n => a n 1%nat) @ \oo --> 3.
+    : (fun n => a n 1%nat) @ \oo --> (3 : R).
 Proof. Admitted.

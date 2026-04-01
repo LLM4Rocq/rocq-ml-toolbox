@@ -1,4 +1,4 @@
-From mathcomp Require Import all_algebra all_ssreflect classical_sets cardinality.
+From mathcomp Require Import all_ssreflect all_algebra classical_sets cardinality.
 
 Set Implicit Arguments.
 Unset Strict Implicit.

@@ -1,4 +1,4 @@
-From mathcomp Require Import all_algebra all_ssreflect.
+From mathcomp Require Import all_ssreflect all_algebra.
 From mathcomp Require Import reals complex derive topology normedtype.
 
 Set Implicit Arguments.
@@ -6,6 +6,7 @@ Unset Strict Implicit.
 Unset Printing Implicit Defensive.
 
 Local Open Scope ring_scope.
+Local Open Scope classical_set_scope.
 
 Local Parameter R : realType.
 

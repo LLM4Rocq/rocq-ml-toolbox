@@ -1,4 +1,4 @@
-From mathcomp Require Import all_algebra all_ssreflect.
+From mathcomp Require Import all_ssreflect all_algebra.
 From mathcomp Require Import reals complex.
 
 Set Implicit Arguments.

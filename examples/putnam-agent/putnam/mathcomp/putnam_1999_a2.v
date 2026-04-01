@@ -1,4 +1,4 @@
-From mathcomp.analysis Require Import reals. From mathcomp Require Import ssrnat ssrnum ssralg fintype poly.
+From mathcomp Require Import reals ssrnat ssrnum ssralg fintype poly.
 Open Scope ring_scope.
 Theorem putnam_1999_a2
     (R : realType)

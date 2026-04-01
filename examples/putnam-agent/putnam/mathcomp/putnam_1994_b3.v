@@ -13,6 +13,6 @@ Local Open Scope classical_set_scope.
 Parameter R : realType.
 Definition putnam_1993_b3_solution : set R := [set k | k < 1].
 Theorem putnam_1993_b3
-    : [set k | forall f (hf : forall x, differentiable f x /\ 0 < f x < f^`() x),
-        exists N : R, forall x, N < x -> expR (k * x) < f x] = putnam_1993_b3_solution.
+    : [set k | forall (f : R -> R) (hf : forall x : R, differentiable f x /\ 0 < f x < f^`() x),
+        exists N : R, forall x : R, N < x -> expR (k * x) < f x] = putnam_1993_b3_solution.
 Proof. Admitted.

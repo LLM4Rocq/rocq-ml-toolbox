@@ -1,4 +1,4 @@
-From mathcomp Require Import all_algebra all_ssreflect.
+From mathcomp Require Import all_ssreflect all_algebra.
 From mathcomp Require Import reals normedtype sequences topology.
 From mathcomp Require Import classical_sets.
 Import numFieldNormedType.Exports.
@@ -22,6 +22,6 @@ Theorem putnam_2015_b4
         (\sum_(1 <= k < n) 
         (tri_fun i j k))))
     (C : rat)
-    (hf : (fun n : nat => f n) @ \oo --> ratr C)
+    (hf : (fun n : nat => f n) @ \oo --> (ratr C : R))
     : (numq C, denq C) = putnam_2015_b4_solution.
 Proof. Admitted.

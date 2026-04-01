@@ -1,4 +1,4 @@
-From mathcomp Require Import all_algebra all_ssreflect morphism.
+From mathcomp Require Import all_ssreflect all_algebra morphism.
 From mathcomp Require Import reals sequences exp.
 From mathcomp Require Import classical_sets.
 

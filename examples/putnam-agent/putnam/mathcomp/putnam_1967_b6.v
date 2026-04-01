@@ -7,6 +7,7 @@ Unset Strict Implicit.
 Unset Printing Implicit Defensive.
 
 Local Open Scope ring_scope.
+Local Open Scope classical_set_scope.
 
 Parameter R : realType.
 Theorem putnam_1967_b6

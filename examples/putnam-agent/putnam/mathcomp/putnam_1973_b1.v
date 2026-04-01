@@ -1,4 +1,4 @@
-From mathcomp Require Import all_algebra all_ssreflect boolp.
+From mathcomp Require Import all_ssreflect all_algebra boolp.
 Import Order.TTheory GRing.Theory Num.Def Num.Theory.
 
 Set Implicit Arguments.

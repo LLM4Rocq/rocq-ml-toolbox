@@ -16,6 +16,6 @@ Theorem putnam_1967_b3
     (f g : R -> R)
     (fgcont : continuous f /\ continuous g)
     (fgperiod : periodic f 1 /\ periodic g 1)
-    : (fun n : nat => \int[mu]_(x in [set y | 0 < y < 1]) (f x * g (n%:~R * x))) --> 
+    : (fun n : nat => \int[mu]_(x in [set y | 0 < y < 1]) (f x * g (n%:~R * x))) @ \oo --> 
         (\int[mu]_(x in [set y | 0 < y < 1]) f x) * (\int[mu]_(x in [set y | 0 < y < 1]) g x).
 Proof. Admitted.

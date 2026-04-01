@@ -1,4 +1,4 @@
-From mathcomp Require Import all_algebra all_ssreflect.
+From mathcomp Require Import all_ssreflect all_algebra.
 From mathcomp Require Import reals trigo lebesgue_integral lebesgue_measure measure.
 From mathcomp Require Import classical_sets cardinality.
 

@@ -1,4 +1,4 @@
-From mathcomp Require Import all_algebra all_ssreflect.
+From mathcomp Require Import all_ssreflect all_algebra.
 From mathcomp Require Import reals exp sequences boolp normedtype.
 Import Order.TTheory Order.Syntax GRing.Theory Num.Def Num.Theory Monoid Monoid.Theory.
 Import numFieldNormedType.Exports.

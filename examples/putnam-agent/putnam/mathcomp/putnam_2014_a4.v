@@ -1,12 +1,13 @@
-From mathcomp.analysis Require Import probability.
+From mathcomp Require Import probability.
 From mathcomp Require Import all_ssreflect.
 From mathcomp Require Import ssralg poly ssrnum ssrint interval finmap.
 From mathcomp Require Import mathcomp_extra boolp classical_sets functions.
 From mathcomp Require Import cardinality fsbigop.
 From HB Require Import structures.
-From mathcomp.analysis Require Import exp numfun lebesgue_measure lebesgue_integral.
-From mathcomp.analysis Require Import reals ereal signed topology normedtype sequences esum measure.
-From mathcomp.analysis Require Import exp numfun lebesgue_measure lebesgue_integral kernel.
+From mathcomp Require Import exp numfun lebesgue_measure lebesgue_integral.
+From mathcomp Require Import reals ereal signed topology normedtype sequences esum measure.
+From mathcomp Require Import exp numfun lebesgue_measure lebesgue_integral kernel.
+Section putnam_2014_a4_section.
 Context d (T : measurableType d) (R : realType) (P : probability T R).
 Definition putnam_2014_a4_solution : R := 1 / 3.
 Open Scope ring_scope.
@@ -18,3 +19,5 @@ Theorem putnam_2014_a4
     : (forall (P : probability T R), putnam_2014_a4_solution <= (pmf X 0)) /\ 
       (exists (P : probability T R), putnam_2014_a4_solution = (pmf X 0)).
 Proof. Admitted.
+
+End putnam_2014_a4_section.

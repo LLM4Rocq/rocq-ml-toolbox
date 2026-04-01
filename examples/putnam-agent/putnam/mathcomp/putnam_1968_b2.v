@@ -1,4 +1,4 @@
-From mathcomp Require Import all_algebra all_ssreflect fintype fingroup.
+From mathcomp Require Import all_ssreflect all_algebra fintype fingroup.
 From mathcomp Require Import classical_sets cardinality.
 
 Set Implicit Arguments.

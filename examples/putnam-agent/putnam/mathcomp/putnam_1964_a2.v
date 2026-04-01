@@ -1,4 +1,4 @@
-From mathcomp Require Import all_algebra all_ssreflect.
+From mathcomp Require Import all_ssreflect all_algebra.
 From mathcomp Require Import reals topology normedtype measure lebesgue_measure lebesgue_integral.
 From mathcomp Require Import classical_sets.
 Import numFieldNormedType.Exports.

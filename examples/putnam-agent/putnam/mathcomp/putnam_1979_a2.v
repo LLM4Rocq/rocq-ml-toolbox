@@ -1,4 +1,4 @@
-From mathcomp Require Import all_algebra all_ssreflect.
+From mathcomp Require Import all_ssreflect all_algebra.
 From mathcomp Require Import reals topology sequences derive normedtype realfun real_interval.
 From mathcomp Require Import classical_sets.
 

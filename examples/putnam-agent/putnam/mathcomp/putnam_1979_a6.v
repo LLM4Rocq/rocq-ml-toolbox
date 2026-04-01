@@ -1,4 +1,4 @@
-From mathcomp Require Import all_algebra all_ssreflect fintype.
+From mathcomp Require Import all_ssreflect all_algebra fintype.
 From mathcomp Require Import reals.
 
 Set Implicit Arguments.
