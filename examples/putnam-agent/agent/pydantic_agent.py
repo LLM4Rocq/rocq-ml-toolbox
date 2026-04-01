@@ -337,6 +337,7 @@ def build_scalable_putnam_agent(model: Any = None, *, retries: int = 2) -> Agent
 class PutnamAgentTask:
     prompt: str
     problem: PutnamBenchProblem
+    name: str = ""
 
 
 @dataclass
@@ -359,15 +360,26 @@ class ScalablePutnamRunner:
         print(f"[{stamp}][{self.log_prefix}] {message}", flush=True)
 
     async def run_task(self, task: PutnamAgentTask) -> str:
-        self._log(f"task start: {task.problem.source_path.name}")
+        task_label = task.name or task.problem.source_path.name
+        self._log(f"task start: {task_label}")
         client = self.client_factory()
-        session = PutnamAgentSession.from_problem(client, task.problem, timeout=self.timeout)
+        session_logger: Callable[[str], None] | None = None
+        if self.logger is not None:
+            session_logger = lambda message, label=task_label: self.logger(f"{label} | {message}")
+        session = PutnamAgentSession.from_problem(
+            client,
+            task.problem,
+            timeout=self.timeout,
+            logger=session_logger,
+            log_enabled=self.log_enabled,
+            log_prefix=task_label,
+        )
         try:
             result = await self.agent.run(task.prompt, deps=session)
-            self._log(f"task done: {task.problem.source_path.name}")
+            self._log(f"task done: {task_label}")
             return str(result.output)
         except Exception as exc:
-            self._log(f"task failed: {task.problem.source_path.name} ({exc})")
+            self._log(f"task failed: {task_label} ({exc})")
             raise
         finally:
             close = getattr(client, "close", None)

@@ -1,7 +1,7 @@
 # Putnam Pydantic-AI Agents
 
 This benchmark folder ships with one agent implementation in
-`putnam_agent/pydantic_agent.py`:
+`agent/pydantic_agent.py`:
 
 - `build_scalable_putnam_agent`: designed for horizontal scale (many independent agent sessions with `ScalablePutnamRunner`) and with `safe_verify` required at `end`.
 
@@ -44,7 +44,7 @@ import sys
 
 sys.path.insert(0, str(Path("examples/putnam-agent").resolve()))
 
-from putnam_agent.pydantic_agent import (
+from agent.pydantic_agent import (
     PutnamAgentSession,
     PutnamBenchProblem,
     build_scalable_putnam_agent,
@@ -70,6 +70,28 @@ PY
 pytest -q examples/putnam-agent/test_pydantic_agent.py
 ```
 
+## Real-time Feedback
+
+Two minimal options:
+
+1) Built-in console logs:
+
+```python
+session = PutnamAgentSession.from_problem(client, problem, log_enabled=True)
+```
+
+2) Custom logger function:
+
+```python
+from agent import make_console_logger
+
+session = PutnamAgentSession.from_problem(
+    client,
+    problem,
+    logger=make_console_logger("putnam-1980-b1"),
+)
+```
+
 ## Quick Sketch (Real Model)
 
 ```python
@@ -79,10 +101,11 @@ import sys
 # from repository root
 sys.path.insert(0, str(Path("examples/putnam-agent").resolve()))
 
-from putnam_agent.agent import (
+from agent import (
     PutnamAgentSession,
     PutnamBenchProblem,
     build_scalable_putnam_agent,
+    make_console_logger,
 )
 from rocq_ml_toolbox.inference.client import PytanqueExtended
 
@@ -92,9 +115,31 @@ problem = PutnamBenchProblem.from_file(
 )
 
 client = PytanqueExtended("127.0.0.1", 5000)
-session = PutnamAgentSession.from_problem(client, problem)
+session = PutnamAgentSession.from_problem(
+    client,
+    problem,
+    logger=make_console_logger("putnam-1990-a1"),  # real-time feedback
+)
 
 agent = build_scalable_putnam_agent(model="openai:gpt-4.1-mini")
 result = agent.run_sync("Prove the theorem.", deps=session)
 print(result.output)
 ```
+
+## Batch K Agents (Kimi K2.5 via OpenRouter)
+
+Use the ready-made script:
+
+```bash
+OPENROUTER_API_KEY=sk-or-... \
+python examples/putnam-agent/run_batch_kimi_openrouter.py \
+  -k 6 \
+  --host 127.0.0.1 \
+  --port 5000
+```
+
+Notes:
+
+- Default problem: `examples/putnam-agent/putnam/mathcomp/putnam_1965_a5.v`
+- Default model: `moonshotai/kimi-k2.5`
+- Logs are enabled by default for real-time feedback (`--quiet` to disable)
