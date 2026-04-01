@@ -1,6 +1,6 @@
 # Docker
 
-Tools to build and run OPAM-based Rocq/Coq environments with Docker. Includes helpers to start Redis, run the inference server in-container, and extract `.v` sources.
+Tools to build and run OPAM-based Rocq/Coq environments with Docker. Includes helpers to run `rocq-ml-server` in-container and extract `.v` sources.
 
 ## Base images
 The `docker/docker-compose.yaml` file builds four images:
@@ -31,12 +31,13 @@ cfg = OpamConfig.from_yaml("notebooks/coq-corn.yaml")
 opam_docker = OpamDocker(cfg)
 try:
     opam_docker.start_inference_server(port=5000)
-    sources = opam_docker.extract_source_files_from_folder("Stdlib")
+    sources = opam_docker.extract_source_files_from_target("Stdlib")
     print(len(sources))
 finally:
     opam_docker.close()
 ```
 
 ## Useful helpers
-- `list_opam_folder`, `extract_source_files_from_folder`, `extract_source_files_from_package`.
+- `list_opam_folder`, `extract_source_files_from_target`, `extract_source_files_from_corelib`.
+- `extract_files_from_package`, `copy_coq_files_from_package_to_target`, `copy_elpi_files_from_package_to_target`.
 - `get_source` and `upload_source` to read/write `.v` files inside the container.

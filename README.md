@@ -1,41 +1,54 @@
 # rocq-ml-toolbox
 
-A toolbox for Rocq environments, scalable proof interaction, and project parsing for ML workflows.
+Toolbox for ML workflows with Rocq/Coq: scalable proof interaction, parser utilities, Docker helpers, and safe proof-checking.
 
 ## Components
-- Docker: build and manage OPAM-based images, start Redis and the inference server in-container. See `src/rocq_ml_toolbox/docker/README.md`.
-- Inference: a Flask/Gunicorn server that orchestrates pet-server workers with Redis caching, plus a Python client. See `src/rocq_ml_toolbox/inference/README.md`.
-- Parser: proof and TOC extraction on top of the inference client. See `src/rocq_ml_toolbox/parser/README.md`.
-- Rocq LSP: minimal LSP client for coq-lsp/rocq-lsp to fetch AST data. See `src/rocq_ml_toolbox/rocq_lsp/README.md`.
+- Inference server (`rocq-ml-server`): FastAPI + uvicorn API with Redis-backed sessions and an arbiter supervising multiple `pet-server` workers. See `src/rocq_ml_toolbox/inference/README.md`.
+- Parser: proof/AST extraction utilities layered on top of the inference client. See `src/rocq_ml_toolbox/parser/README.md`.
+- SafeVerify: verify that a target file safely discharges obligations from a source file. See `examples/safeverify/README.md`.
+- Docker helpers: build OPAM-based images and run the inference stack in-container. See `src/rocq_ml_toolbox/docker/README.md`.
+- Rocq LSP: minimal JSON-RPC client for `coq-lsp` AST access. See `src/rocq_ml_toolbox/rocq_lsp/README.md`.
 
-## Quick start (local, no Docker)
-1) Install Python deps (plus pytanque):
-
-```bash
-pip install -e .[server,parser,client]
-# Install pytanque separately and ensure `pet-server` is on PATH.
-```
-
-2) Start Redis and the inference server:
+## Quick Start (Local, No Docker)
+1) Install package dependencies:
 
 ```bash
-docker run -d -p 6379:6379 redis:latest
-rocq-ml-server --num-pet-server 8 --workers 17
+pip install -e .[all]
+pip install git+https://github.com/llm4rocq/pytanque.git
 ```
+
+2) Start the server:
+
+```bash
+rocq-ml-server --num-pet-server 4 --workers 9 --port 5000
+```
+
+`rocq-ml-server` starts `redis-server`, the arbiter, and uvicorn. Ensure `redis-server` and `pet-server` are available on `PATH`.
 
 3) Use the Python client:
 
 ```python
-from rocq_ml_toolbox.inference.client import PetClient
+from rocq_ml_toolbox.inference.client import PytanqueExtended
 
-client = PetClient("127.0.0.1", 5000)
+client = PytanqueExtended("127.0.0.1", 5000)
 client.connect()
+
 state = client.get_state_at_pos("/path/to/file.v", line=10, character=0)
 state = client.run(state, "intros.")
-goals = client.goals(state)
+print(client.goals(state))
 ```
+
+## SafeVerify Quick Example
+```bash
+rocq-ml-safeverify \
+  examples/safeverify/nontrivial/Source.v \
+  examples/safeverify/nontrivial/TargetGood.v \
+  --root examples/safeverify -v
+```
+
+The same check is available through the inference API via `client.safeverify(...)`.
 
 ## Notebooks
 - `notebooks/itp.ipynb`: interactive theorem proving at scale.
-- `notebooks/scrapping.ipynb`: dataset extraction without Docker.
+- `notebooks/scrapping.ipynb`: data extraction without Docker.
 - `notebooks/docker.ipynb`: building and using custom Docker images.

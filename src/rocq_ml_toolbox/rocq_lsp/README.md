@@ -18,4 +18,4 @@ with LspClient() as client:
 
 ## Notes
 - `protocol.py` is generated from `protocol.atd` and provides typed JSON helpers.
-- The inference server uses this client for `/get_document`.
+- The inference stack uses this client when building dump/AST data exposed through `/get_dump`.
