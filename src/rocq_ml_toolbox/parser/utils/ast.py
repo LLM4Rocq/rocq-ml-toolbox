@@ -19,7 +19,7 @@ def read_keyword(keyword: str, l: List, result: List[str]) -> List[str]:
 
 def list_dependencies(ast: dict) -> List[str]:
     """Extract clean dependency names from an AST."""
-    expr = ast["v"]["expr"]
+    expr = ast['st']["v"]["expr"]
     raw_dependencies = read_keyword("Ser_Qualid", expr, [])
 
     dependencies = []

@@ -4,58 +4,56 @@ from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Union
 from functools import cached_property
 
-from pytanque.protocol import Range, Position
-from .ast.model import VernacElement
+from pytanque.protocol import Range, Position, Goal
 
-@dataclass
-class Dependency:
-    """Reference to a premise or hypothesis used in a proof step."""
-
-    element: VernacElement
-    range: Range
-
-    @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> Dependency:
-        """Build a dependency from a dictionary representation."""
-        raise Exception("from_json not implemented for VernacElement")
-        return cls(
-            element=VernacElement.from_json(d["element"]),
-            range=Range.from_json(d["range"])
-        )
+from .ast.model import VernacElement, Span
 
 @dataclass
 class Step:
     """Single proof step together with its state transitions."""
 
     step: str
-    goals: Any
-    dependencies: List[Dependency]
+    goals: List[Goal]
+    dependencies: List[VernacElement]
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> Step:
         """Build a proof step from a dictionary representation."""
         return cls(
             step=d["step"],
-            state_in=d["state_in"],
-            state_out=d["state_out"],
-            dependencies=[Dependency.from_json(x) for x in d["dependencies"]],
+            goals=[Goal.from_json(x) for x in d["goals"]],
+            dependencies=[VernacElement.from_json(x) for x in d["dependencies"]]
         )
+
+    def to_json(self) -> Any:
+        return {
+            "step": self.step,
+            "goals": [goal.to_json() for goal in self.goals],
+            "dependencies": [dep.to_json() for dep in self.dependencies]
+        }
 
 @dataclass
 class Theorem:
     """Single proof step together with its state transitions."""
     steps: List[Step]
-    initial_goals: Any
+    initial_goals: List[Goal]
     element: VernacElement
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> Step:
         """Build a proof step from a dictionary representation."""
         return cls(
-            step=d["step"],
-            goals=d["goals"],
-            dependencies=[Dependency.from_json(x) for x in d["dependencies"]],
+            steps=[Step.from_json(step) for step in d["steps"]],
+            initial_goals=[Goal.from_json(goal) for goal in d['initial_goals']],
+            element=VernacElement.from_json(d['element'])
         )
+    
+    def to_json(self) -> Any:
+        return {
+            "steps": [step.to_json() for step in self.steps],
+            "initial_goals": [goal.to_json() for goal in self.initial_goals],
+            "element": self.element.to_json()
+        }
 
 @dataclass
 class Source:
@@ -70,8 +68,15 @@ class Source:
         return cls(
             path=d["path"],
             content=d["content"],
-            logical_path=d["logical_path"],
+            logical_path=d["logical_path"] if "logical_path" in d else None,
         )
+    
+    def to_json(self) -> Any:
+        return {
+            "path": self.path,
+            "content": self.content,
+            "logical_path": self.logical_path
+        }
 
     @classmethod
     def from_local_path(cls, path: str) -> Source:
@@ -86,6 +91,9 @@ class Source:
     @cached_property
     def content_utf8(self) -> bytes:
         return self.content.encode("utf-8")
+
+    def extract_span(self, span: Span) -> str:
+        return self.content_utf8[span.bp:span.ep].decode('utf-8')
 
 class ParserError(Exception):
     """Base class for parser error"""

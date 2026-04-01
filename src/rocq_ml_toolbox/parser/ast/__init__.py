@@ -5,7 +5,7 @@ from .model import (
     UnsupportedNode,
     AstNode,
 )
-from .driver import compute_ast, parse_ast_dump, load_ast_dump
+from .driver import parse_ast_dump, load_proof_dump
 
 __all__ = [
     "Span",
@@ -17,7 +17,6 @@ __all__ = [
     "TypeDecl",
     "UnsupportedNode",
     "AstNode",
-    "compute_ast",
     "parse_ast_dump",
-    "load_ast_dump",
+    "load_proof_dump",
 ]

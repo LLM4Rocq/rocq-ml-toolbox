@@ -2,23 +2,28 @@
 
 from typing import List, Optional, Tuple, Generator, Dict, Union
 import re
-
+import tempfile
+from collections import defaultdict
+from pathlib import Path
 from pytanque.protocol import State, Opts
 
 from .utils.ast import list_dependencies
 from .utils.message import parse_about, parse_loadpath, solve_physical_path
 from .utils.position import pos_to_offset, offset_to_pos
 
-from .ast.model import VernacKind, VernacElement
-from .parser import Range, Source, Dependency, Theorem, ParserError, Step
-from ..inference.client import PetClient, ClientError
+from .glob.parser import GlobDefinition, GlobKind
+from .ast.model import VernacKind, VernacElement, Span
+from .parser import Source, Theorem, ParserError, Step
+from .diags.parser import Diagnostic
+from .proof.parser import ProofDump
 
-
+from pytanque import PetanqueError
+from ..inference.client import PytanqueExtended
 
 class RocqParser:
     """Interact with petanque to collect proof structure and metadata."""
 
-    def __init__(self, client: PetClient):
+    def __init__(self, client: PytanqueExtended):
         """Create a parser bound to a client."""
         super().__init__()
         self.client = client
@@ -32,23 +37,23 @@ class RocqParser:
     def _extract_blocks(content: str):
         return re.split(r'(?<=\.\s)', content)
 
-    def extract_element(self, state: State, element: str, timeout: int=30, retry=1, is_notation=False) -> Tuple[Optional[VernacElement], bool]:
+    def extract_element(self, state: State, element: str, timeout: int=30, is_notation=False) -> Tuple[Optional[VernacElement], bool]:
         try:
             if is_notation:
-                substate = self.client.run(state, f'About "{element}".', timeout=timeout, retry=retry)
+                substate = self.client.run(state, f'About "{element}".', timeout=timeout)
             else:
-                substate = self.client.run(state, f'About {element}.', timeout=timeout, retry=retry)
+                substate = self.client.run(state, f'About {element}.', timeout=timeout)
             if substate.feedback:
                 for feedback_tuple in substate.feedback:
                     feedback = feedback_tuple[1]
-                    element, is_local = parse_about(feedback, self.map_logical_physical, self.map_physical_logical)
-                    if element:
-                        return element, is_local
+                    element_extr, is_local = parse_about(feedback, self.map_logical_physical, self.map_physical_logical)
+                    if element_extr:
+                        return element_extr, is_local
                 return None, False
-        except ClientError:
+        finally:
             return None, False
 
-    def extract_dependencies(self, state: State, tactic: str, timeout: int=30, retry=1) -> List[Dependency]:
+    def extract_dependencies(self, state: State, tactic: str, timeout: int=30) -> List[VernacElement]:
         ast = self.client.ast(state, tactic)
         if ast:
             constants = list_dependencies(ast)
@@ -56,43 +61,151 @@ class RocqParser:
             constants = []
         dependencies = []
         for constant in constants:
-            element, _ = self.extract_element(state, constant, timeout=timeout, retry=retry)
+            element, _ = self.extract_element(state, constant, timeout=timeout)
             if element:
+                element.name = constant
                 dependencies.append(element)
         return dependencies
 
-    def _extract_loadpath(self, timeout: int=30, retry=1) -> Dict[str, str]:
-        try:
-            state = self.client.get_root_state('/tmp/init.v')
-        except ClientError as e:
-            raise ParserError('Missing /tmp/init.v file.')
-        result = self.client.run(state, 'Print LoadPath.', timeout=timeout, retry=retry)
+    def _extract_loadpath(self, timeout: int=30) -> Dict[str, str]:
+        path = self.client.empty_file()
+        state = self.client.get_root_state(path)
+        result = self.client.run(state, 'Print LoadPath.', timeout=timeout)
         return parse_loadpath(result.feedback[0][1])
 
-    def extract_toc(self, source: Source) -> List[VernacElement]:
-        toc = self.client.get_ast(source.path)
+    def extract_dump(self, source: Source, root:Optional[str]=None, force_dump=True) -> Tuple[ProofDump, List[VernacElement], List[Diagnostic]]:
+        proofs, toc, diags = self.client.get_dump(source.path, root=root, force_dump=force_dump)
         content_utf_8 = source.content.encode("utf-8")
         for entry in toc:
-            entry.data['content'] = content_utf_8[entry.span.bp:entry.span.ep].decode("utf-8")
-        return toc
+            if entry.span:
+                entry.data['content'] = content_utf_8[entry.span.bp:entry.span.ep].decode("utf-8")
+        return proofs, toc, diags
 
-    def extract_proofs(self, source: Source, timeout=120, retry=1, solve_deps=False, verbose=False) -> Generator[Theorem, None, None]:
-        ast = self.client.get_ast(source.path)
+    def scan_glob_for_hb(self, source: Source) -> Dict[str, VernacElement]:
+        glob = self.client.get_glob(source.path)
+        span_to_glob: Dict[str, List[GlobDefinition]] = defaultdict(list)
+        for entry in glob.entries:
+            if isinstance(entry, GlobDefinition):
+                key = f"{entry.bp}:{entry.ep}"
+                span_to_glob[key].append(entry)
+        
+        result = {}
+        for lst_entries in span_to_glob.values():
+            name = None
+            span = None
+            for entry in lst_entries:
+                
+                if entry.kind == GlobKind.ABBREV:
+                    name = entry.secpath
+                    span = Span(entry.bp, entry.ep+1)
+                    break
+
+            if name and span and not name.startswith('Builders_'):
+                el = VernacElement(VernacKind.HB, span=span, name=name)
+                key = f"{span.bp}:{span.ep}"
+                result[key] = el
+        return result
+    
+    def ast(self, source: Source, root: Optional[Path]=None,check_hb=True) -> Tuple[List[VernacElement], List[VernacElement]]:
+        _, ast, _ = self.client.get_dump(source.path, root=root)
+    
+        target_elements = []
+        proof_elements = []
+        namespaces_stack = []
+        hb_candidates = {}
+        if check_hb:
+            hb_candidates = self.scan_glob_for_hb(source)
+        targets_kind = [
+            VernacKind.DEFINITION,
+            VernacKind.SYNTACTIC_DEFINITION,
+            VernacKind.START_THEOREM_PROOF,
+            VernacKind.NOTATION,
+            VernacKind.RESERVED_NOTATION,
+            VernacKind.FIXPOINT,
+            VernacKind.COFIXPOINT,
+            VernacKind.COERCION,
+            VernacKind.CANONICAL,
+            VernacKind.INSTANCE,
+            VernacKind.INDUCTIVE,
+            VernacKind.COINDUCTIVE,
+            VernacKind.RECORD,
+            VernacKind.STRUCTURE,
+            VernacKind.VARIANT,
+            VernacKind.CLASS,
+            VernacKind.LTAC,
+            VernacKind.CONSTANT,
+            VernacKind.FIELD,
+            VernacKind.CONSTRUCTOR
+        ]
+        proofs_kind = [
+            VernacKind.PROOF,
+            VernacKind.PROOF_STEP,
+            VernacKind.SUBPROOF,
+            VernacKind.END_SUBPROOF,
+            VernacKind.BULLET,
+            VernacKind.PROOF,
+            VernacKind.END_PROOF
+        ]
+        for entry in ast:
+            kind = entry.kind
+            if kind == VernacKind.EXTEND:
+                if check_hb and entry.name and entry.name.startswith('ElpiHB'):
+                    span = entry.span
+                    if not span:
+                        continue
+                    key = f"{span.bp}:{span.ep}"
+                    if key in hb_candidates:
+                        hb_entry = hb_candidates[key]
+                        stack_modules = [el[1] for el in namespaces_stack if el[0] == 'MODULE']
+                        history = [el[1] for el in namespaces_stack]
+                        stack_modules.append(hb_entry.name)
+                        full_name = ".".join(stack_modules)
+                        hb_entry.data['fqn'] = full_name
+                        hb_entry.data['history'] = ".".join(history)
+                        target_elements.append(hb_entry)
+            match kind:
+                case VernacKind.BEGIN_SECTION:
+                    if entry.name:
+                        namespaces_stack.append(("SECTION", entry.name))
+                case VernacKind.DECLARE_MODULE_TYPE| VernacKind.DEFINE_MODULE:
+                    if not entry.data['is_alias'] and entry.name:
+                        namespaces_stack.append(("MODULE", entry.name))
+                case VernacKind.END_SEGMENT:
+                    last_el = namespaces_stack.pop()
+                    assert entry.name == last_el[1]
+                case _ if kind in targets_kind:
+                    stack_modules = [el[1] for el in namespaces_stack if el[0] == 'MODULE']
+                    history = [el[1] for el in namespaces_stack]
+                    if not entry.name:
+                        continue
+                    stack_modules.append(entry.name)
+                    full_name = ".".join(stack_modules)
+                    entry.data['fqn'] = full_name
+                    entry.data['history'] = ".".join(history)
+                    target_elements.append(entry)
+                case _ if kind in proofs_kind:
+                    proof_elements.append(entry)
+        return target_elements, proof_elements
+
+    @staticmethod
+    def extract_proofs_raw(source: Source, ast: List[VernacElement]) -> List[Tuple[VernacElement, List[str]]]:
         proof_open = False
-        initial_goals = None
         theorem_element = None
         steps = []
+        result = []
         namespaces_stack = []
-        state = None
+        prev_entry = None
         for entry in ast:
             span = entry.span
             kind = entry.kind
-            subcontent = source.content_utf8[span.bp:span.ep].decode("utf-8")
+            subcontent = ""
+            if span:
+                subcontent = source.content_utf8[span.bp:span.ep].decode("utf-8")
             match kind:
                 case VernacKind.BEGIN_SECTION:
                     namespaces_stack.append(("SECTION", entry.name))
                 case VernacKind.DECLARE_MODULE_TYPE| VernacKind.DEFINE_MODULE:
-                    if not entry.data['is_alias']:
+                    if not entry.data['is_alias'] and entry.name:
                         namespaces_stack.append(("MODULE", entry.name))
                 case VernacKind.END_SEGMENT:
                     last_el = namespaces_stack.pop()
@@ -100,29 +213,50 @@ class RocqParser:
                 case VernacKind.START_THEOREM_PROOF:
                     proof_open = True
                     theorem_element = entry
-                    pos = offset_to_pos(source.content_utf8, entry.span.ep)
-                    state = self.client.get_state_at_pos(source.path, pos.line, pos.character, timeout=timeout, retry=retry)
-                    initial_goals = self.client.goals(state)
-                case VernacKind.PROOF_STEP:
+                case VernacKind.PROOF:
+                    if not prev_entry:
+                        raise ParserError(f'No prev_entry at {entry.span}')
+                    proof_open = True
+                    theorem_element = prev_entry
+                    steps.append(subcontent)
+                case VernacKind.PROOF_STEP | VernacKind.SUBPROOF | VernacKind.END_SUBPROOF | VernacKind.BULLET:
                     if proof_open:
-                        deps = self.extract_dependencies(state, subcontent)
-                        state = self.client.run(state, subcontent, timeout=timeout, retry=retry)
-                        goals = self.client.goals(state)
-                        step = Step(subcontent, goals, deps)
-                        steps.append(step)
-                        
+                        steps.append(subcontent)
                 case VernacKind.END_PROOF:
                     if proof_open:
                         stack_modules = [el[1] for el in namespaces_stack if el[0] == 'MODULE']
+                        if not theorem_element or not theorem_element.name:
+                            continue
                         stack_modules.append(theorem_element.name)
                         theorem_element.data['fqn'] = ".".join(stack_modules)
-                        yield Theorem(steps, initial_goals, theorem_element)
-
+                        result.append((theorem_element, steps))
+                    proof_open = False
+                    steps = []
+                    theorem_element = None
             match kind:
-                case VernacKind.START_THEOREM_PROOF | VernacKind.PROOF | VernacKind.PROOF_STEP:
+                case VernacKind.PROOF | VernacKind.PROOF_STEP | VernacKind.SUBPROOF | VernacKind.END_SUBPROOF | VernacKind.BULLET:
                     pass
+                case VernacKind.START_THEOREM_PROOF:
+                    steps = []
                 case _:
                     proof_open = False
                     steps = []
-                    initial_goals = None
                     theorem_element = None
+            
+            prev_entry = entry
+        return result
+
+    def extract_full_proof(self, source: Source, element: VernacElement, steps_raw: List[str], timeout=60):
+        if not element.span:
+            raise ParserError(f'{element} has no span in {source.path}')
+        pos = offset_to_pos(source.content_utf8, element.span.ep)
+        state = self.client.get_state_at_pos(source.path, pos.line, pos.character, timeout=timeout)
+        initial_goals = self.client.goals(state)
+        steps = []
+        for step_str in steps_raw:
+            deps = self.extract_dependencies(state, step_str)
+            state = self.client.run(state, step_str, timeout=timeout)
+            goals = self.client.goals(state)
+            step = Step(step_str, goals, deps)
+            steps.append(step)
+        return Theorem(steps, initial_goals, element)

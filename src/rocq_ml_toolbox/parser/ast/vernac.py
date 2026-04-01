@@ -102,6 +102,11 @@ def parse_notation(obj: dict) -> VernacElement:
     name = ensure_str(jmaybe(obj, "v", "expr", 1, 2, "ntn_decl_string", "v", default=None))
     return VernacElement(span=span, kind=VernacKind.NOTATION, name=name)
 
+def parse_syntactic_definition(obj: dict) -> VernacElement:
+    span = extract_span(obj)
+    name = ensure_str(jmaybe(obj, "v", "expr", 1, 1, "v", 1, default=None))
+    return VernacElement(span=span, kind=VernacKind.SYNTACTIC_DEFINITION, name=name)
+
 
 def parse_reserved_notation(obj: dict) -> VernacElement:
     span = extract_span(obj)
@@ -112,12 +117,16 @@ def parse_reserved_notation(obj: dict) -> VernacElement:
 def parse_fixpoint(obj: dict) -> VernacElement:
     span = extract_span(obj)
     name = ensure_str(jmaybe(obj, "v", "expr", 1, 2, 1, 0, "fname", "v", 1, default=None))
+    if name == 'None':
+        name = ensure_str(jmaybe(obj, "v", "expr", 1, 2, 0, "fname", "v", 1, default=None))
     return VernacElement(span=span, kind=VernacKind.FIXPOINT, name=name)
 
 
 def parse_cofixpoint(obj: dict) -> VernacElement:
     span = extract_span(obj)
-    name = ensure_str(jmaybe(obj, "v", "expr", 1, 2, 0, "fname", "v", 1, default=None))
+    name = ensure_str(jmaybe(obj, "v", "expr", 1, 2, 1, 0, "fname", "v", 1, default=None))
+    if name == 'None':
+        name = ensure_str(jmaybe(obj, "v", "expr", 1, 2, 0, "fname", "v", 1, default=None))
     return VernacElement(span=span, kind=VernacKind.COFIXPOINT, name=name)
 
 
@@ -141,7 +150,7 @@ def parse_instance(obj: dict) -> VernacElement:
         if subobj[0] == "Anonymous":
             name = None
         else:
-            name = ensure_str(jmaybe(subobj, 1, 0, default=None))
+            name = ensure_str(jmaybe(subobj, 1, 1, default=None))
     return VernacElement(span=span, kind=VernacKind.INSTANCE, name=name)
 
 
@@ -159,7 +168,11 @@ def parse_extend(obj: dict) -> Optional[VernacElement]:
         if name == "VernacSolve":
             return VernacElement(span=span, kind=VernacKind.PROOF_STEP, name=None)
         if name == 'VernacDeclareTacticDefinition':
-            tac_name = jmaybe(obj, "v", "expr", 1, 2, 0, 2, 0, 1, 0, 1, 1, default=None)
+            tac_name = jmaybe(obj, "v", "expr", 1, 2, 0, 2, 0, 1, 0, 1, 1, 1, 0, 1, default=None)
+            if not tac_name:
+                tac_name = jmaybe(obj, "v", "expr", 1, 2, 0, 2, 0, 1, 0, 1, 1)
+                if not isinstance(tac_name, str):
+                    tac_name = None
             return VernacElement(span=span, kind=VernacKind.LTAC, name=tac_name)
     return None
 

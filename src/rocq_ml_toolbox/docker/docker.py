@@ -1,18 +1,17 @@
 from pathlib import Path
-from typing import Optional
-import re
+from typing import Union, Optional
 import shlex
 import sys
 from abc import abstractmethod, ABC
 import io
 import tarfile
 from pathlib import PurePosixPath
+import time
 
 import docker
 from docker.models.containers import Container
 
-from .config import OpamConfig, DockerConfig
-from ..parser.parser import Source
+from .config import DockerConfig
 
 class BaseDocker(ABC):
     """Wraps Docker interactions."""
@@ -25,8 +24,8 @@ class BaseDocker(ABC):
         image_name = config.name + ':' + config.tag
         
         if kill_clone: self._kill_clone(image_name)
-        self.container: Container=None
         self._load_container(rebuild=rebuild, timeout_install=timeout_install)
+        self.container: Container
 
     @staticmethod
     def _timeout_handler(signum, frame):
@@ -45,12 +44,12 @@ class BaseDocker(ABC):
         except Exception as e:
             raise RuntimeError(f"Failed to kill clones for image {image_name}: {e}")
     
-    def _load_container(self, rebuild=False, **kwargs) -> Optional[Container]:
+    def _load_container(self, rebuild=False, **kwargs):
         image_name = self.config.name + ':' + self.config.tag
         user = self.config.user
         filterred_images = self.client.images.list(filters={'reference': image_name})
         if not filterred_images or rebuild:
-            return self._build_image(**kwargs)
+            self._build_image(**kwargs)
         
         self.container = self.client.containers.run(
             image_name,
@@ -107,8 +106,63 @@ class BaseDocker(ABC):
         status = api.exec_inspect(exec_id)
         return int(status.get("ExitCode", 1))
 
-    def exec_cmd(self, cmd) -> str:
+    def exec_cmd_async(
+        self,
+        cmd,
+        *,
+        user: Optional[str] = None,
+        workdir: Optional[str] = None,
+        environment=None,
+        tty: bool = False,
+    ) -> str:
+        """Start a command inside the container and return immediately."""
+        self._ensure_running()
+        api = self.client.api
+        if user is None:
+            user = self.config.user
+
+        exec_id = api.exec_create(
+            self.container.id,
+            cmd,
+            stdout=False,
+            stderr=False,
+            tty=tty,
+            user=user,
+            environment=environment,
+            workdir=workdir,
+        )["Id"]
+
+        api.exec_start(exec_id, detach=True, tty=tty)
+        return exec_id
+
+    def exec_status(self, exec_id: str) -> dict:
+        """Return low-level status information for a detached exec."""
+        return self.client.api.exec_inspect(exec_id)
+
+    def wait_exec(
+        self,
+        exec_id: str,
+        *,
+        poll_interval: float = 0.2,
+        timeout: Optional[float] = None,
+    ) -> int:
+        """Wait for a detached exec to finish and return its exit code."""
+        start = time.monotonic()
+
+        while True:
+            info = self.client.api.exec_inspect(exec_id)
+
+            if not info.get("Running", False):
+                return int(info.get("ExitCode", 1))
+
+            if timeout is not None and (time.monotonic() - start) > timeout:
+                raise TimeoutError(f"Exec {exec_id} did not finish within {timeout} seconds")
+
+            time.sleep(poll_interval)
+
+    def exec_cmd(self, cmd, *, check: bool = True) -> str:
         """Execute a command without streaming and return its stdout."""
+        self._ensure_running()
         api = self.client.api
         exec_id = api.exec_create(
             self.container.id,
@@ -116,11 +170,26 @@ class BaseDocker(ABC):
             stdout=True,
             stderr=True,
             tty=False,
+            user=self.config.user,
         )["Id"]
-        return self.client.api.exec_start(exec_id).decode('utf-8')
+        stdout, stderr = self.client.api.exec_start(exec_id, demux=True)
+        status = api.exec_inspect(exec_id)
+        code = int(status.get("ExitCode", 1))
 
-    def read_file(self, filepath, max_bytes=None, encoding="utf-8") -> str:
+        out_text = (stdout or b"").decode("utf-8", errors="replace")
+        err_text = (stderr or b"").decode("utf-8", errors="replace")
+        if check and code != 0:
+            raise RuntimeError(
+                f"Command failed in container (exit={code}).\n"
+                f"cmd={cmd}\n"
+                f"stdout:\n{out_text}\n"
+                f"stderr:\n{err_text}"
+            )
+        return out_text
+
+    def read_file(self, filepath: Union[str, Path], max_bytes=None, encoding="utf-8") -> str:
         """Read a file from the container filesystem."""
+        filepath = str(filepath)
         api = self.client.api
         cmd = f"sh -lc 'cat -- {shlex.quote(filepath)}'"
         exec_id = api.exec_create(self.container.id, cmd,
@@ -143,15 +212,20 @@ class BaseDocker(ABC):
             raise RuntimeError(f"cat failed with exit code {code}")
         return buf.decode(encoding, errors="replace")
 
-    def kill_container(self, container: Container):
+    def cp(self, source: Union[str, Path], target: Union[str, Path]):
+        cmd = f"sh -lc 'cp -r {shlex.quote(source)} {shlex.quote(target)}'"
+        self.exec_cmd(cmd)
+    
+    def kill_container(self, container: Container, timeout=30):
         try:
             container.kill()
+            container.wait(timeout=timeout)
         finally:
             container.remove(force=True)
 
-    def close(self):
+    def close(self, timeout=30):
         """Stop and remove the underlying containers."""
-        self.kill_container(self.container)
+        self.kill_container(self.container, timeout=timeout)
 
     def write_file(self, path, content: str, create_dir: bool = False, *, encoding: str = "utf-8") -> None:
         """

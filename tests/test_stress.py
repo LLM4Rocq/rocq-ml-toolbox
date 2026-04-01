@@ -2,20 +2,29 @@ import os
 import json
 import concurrent.futures
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 import random
 import psutil
 import time
+import threading
+import multiprocessing as mp
 
-import redis
+from redis import Redis
 import pytest
 from filelock import FileLock
+from pytanque.protocol import (
+    Goal,
+    Inspect,
+    InspectGoals,
+    InspectPhysical
+)
 
-from src.rocq_ml_toolbox.inference.client import PetClient
-from src.rocq_ml_toolbox.inference.redis_keys import pet_status_key, PetStatus
+from rocq_ml_toolbox.parser.rocq_parser import Source, Theorem, VernacElement, RocqParser
+from pytanque import Pytanque
+from pytanque.client import PytanqueMode
+from rocq_ml_toolbox.inference.redis_keys import pet_status_key, PetStatus
+from rocq_ml_toolbox.parser.utils.position import offset_to_pos
 
-
-MC_DIR = os.environ.get("MC_DIR", "stress_test_light/source")
 
 def kill_all_proc(proc_name: str):
     for proc in psutil.process_iter():
@@ -23,185 +32,265 @@ def kill_all_proc(proc_name: str):
             proc.kill()
     time.sleep(1)
 
-def try_proof_kill(entry, host, port) -> bool:
-    client = PetClient(host, port)
-    client.connect()
-    filepath = os.path.join(MC_DIR, entry['filepath'])
+def wait_pause(redis_client: Redis):
+    if redis_client.get("ctrl:state") != "pause":
+        return
+
+    redis_client.incr("ctrl:paused_workers")
     try:
-        state = client.get_state_at_pos(filepath, entry['line'], entry['character'])
-        for step in entry['proof_steps']:
-            kill_all_proc('pet-server')
-            state = client.run(state, step)
-    except Exception as e:
-        return False
-    
+        while redis_client.get("ctrl:state") == "pause":
+            time.sleep(0.2)
+    finally:
+        redis_client.decr("ctrl:paused_workers")
+
+def try_proof_control(entry, host, port, redis_url: str) -> bool:
+    redis_client = Redis.from_url(redis_url, decode_responses=True)
+    redis_client.incr("ctrl:num_workers")
+    client = Pytanque(host, port, mode=PytanqueMode.HTTP)
+    client.connect()
+    wait_pause(redis_client)
+    state = client.get_state_at_pos(entry['filepath'], entry['line'], entry['character'], timeout=60)
+    try:
+        for step in entry['steps']:
+            wait_pause(redis_client)
+            state = client.run(state, step, timeout=60)
+            redis_client.incr("ctrl:tasks_done")
+    finally:
+        redis_client.decr("ctrl:num_workers")
+
     return True
 
-def _cache_paths(n: int) -> tuple[Path, FileLock]:
-    cache = Path(__file__).with_name(f".crrracq_subset_balance_n{n}.json")
-    lock = FileLock(str(cache) + ".lock")
-    return cache, lock, '.crrracq_full.json'
+def coordinator(redis_url: str, fail_each_k=100, stop_event: threading.Event | None = None):
+    redis_client = Redis.from_url(redis_url, decode_responses=True)
 
-def _cache_paths_valid(n: int) -> tuple[Path, FileLock]:
-    cache = Path(__file__).with_name(f".crrracq_subset_valid_n{n}.json")
-    lock = FileLock(str(cache) + ".lock")
-    return cache, lock, '.crrracq_full.json'
+    while stop_event is None or not stop_event.is_set():
+        time.sleep(0.1)
 
-def _load_subset_balanced(n: int):
-    """
-    Select n entries, balanced between SUCCESS and non-SUCCESS, with early stopping.
-    Cached to disk to avoid rescanning the dataset on every pytest run.
-    """
-    cache, lock, full_ds = _cache_paths(n)
+        tasks_done = int(redis_client.get("ctrl:tasks_done") or 0)
+        if tasks_done <= fail_each_k:
+            continue
 
-    with lock:
-        if cache.exists():
-            return json.loads(cache.read_text())
+        redis_client.set("ctrl:state", "pause")
 
-        from datasets import load_dataset
-        ds = load_dataset("theostos/crrracq", split="train")
+        once = False
+        while stop_event is None or not stop_event.is_set():
+            num_workers = int(redis_client.get("ctrl:num_workers") or 0)
+            paused_workers = int(redis_client.get("ctrl:paused_workers") or 0)
 
-        need_ok = n // 2
-        need_bad = n - need_ok
-        ok, bad = [], []
+            if num_workers == paused_workers:
+                if once:
+                    time.sleep(5)
+                else:
+                    break
 
-        for x in ds:
-            if x["status"] == "SUCCESS":
-                if len(ok) < need_ok:
-                    ok.append(x)
-            else:
-                if len(bad) < need_bad:
-                    bad.append(x)
+            time.sleep(0.02)
 
-            if len(ok) == need_ok and len(bad) == need_bad:
-                break
-
-        subset = ok + bad
-
-        payload = [
-            {
-                "filepath": x["filepath"],
-                "line": x["line"],
-                "character": x["character"],
-                "status": x["status"],
-                "proof_steps": x["proof_steps"],
-            }
-            for x in subset
-        ]
-        cache.write_text(json.dumps(payload))
-        return payload
-
-def _load_subset_valid(n: int):
-    """
-    Select n entries.
-    Cached to disk to avoid rescanning the dataset on every pytest run.
-    """
-    cache, lock, full_ds = _cache_paths_valid(n)
-
-    with lock:
-        if cache.exists():
-            return json.loads(cache.read_text())
-
-        from datasets import load_dataset
-        ds = load_dataset("theostos/crrracq", split="train")
-
-        ok = []
-
-        for x in ds:
-            if x["status"] == "SUCCESS":
-                if len(ok) < n:
-                    ok.append(x)
-            if len(ok) == n:
-                break
-
-
-        payload = [
-            {
-                "filepath": x["filepath"],
-                "line": x["line"],
-                "character": x["character"],
-                "status": x["status"],
-                "proof_steps": x["proof_steps"],
-            }
-            for x in ok
-        ]
-        cache.write_text(json.dumps(payload))
-        return payload
-
-def try_proof(entry, host, port, retry=1, failure_rate=0.) -> bool:
-    client = PetClient(host, port)
+        kill_all_proc("pet-server")
+        time.sleep(5)
+        redis_client.set("ctrl:tasks_done", 0)
+        redis_client.set("ctrl:state", "resume")
+    
+def try_proof(entry, host, port) -> bool:
+    client = Pytanque(host, port, mode=PytanqueMode.HTTP)
     client.connect()
-    filepath = os.path.join(MC_DIR, entry["filepath"])
+    filepath = entry["filepath"]
 
-    retry = max(1, int(retry))
+    state = client.get_state_at_pos(filepath, entry["line"], entry["character"])
+    for step in entry["steps"]:
+        state = client.run(state, step, timeout=15)
+    return True
 
-    def call_with_failover(fn, *args, **kwargs):
-        """
-        Keep trying until:
-          - the call succeeds, OR
-          - we hit `retry` failures where failure was NOT simulated.
-        Simulated failures do not stop the loop.
-        """
-        real_failures = 0
-        failure = (random.random() < failure_rate)
-        while True:
+
+def try_timeout_replay_foo(
+    worker_id: int,
+    host: str,
+    port: int,
+    filepath: str,
+    start_barrier: threading.Barrier,
+) -> tuple[int, bool, str]:
+    with Pytanque(host, port, mode=PytanqueMode.HTTP, timeout_http=20 * 60) as client:
+        start_barrier.wait(timeout=30)
+        state = client.get_state_at_pos(filepath, 7, 0, timeout=60)
+
+        first_error = ""
+        try:
+            client.run(state, "vm_compute.", timeout=3)
+        except Exception as exc:
+            first_error = repr(exc)
+
+        if not first_error:
+            return worker_id, False, "expected timeout on first vm_compute."
+
+        deadline = time.time() + 30.0
+        last_error = ""
+        while time.time() < deadline:
             try:
-                return fn(*args, failure=failure, **kwargs)
-            except Exception as e:
-                if failure:
-                    return fn(*args, failure=False, **kwargs)
-                real_failures += 1
-                if real_failures >= retry:
-                    raise  # bubble up to return False
+                state = client.run(state, "idtac.", timeout=15)
+                client.goals(state, timeout=15)
+                return worker_id, True, ""
+            except Exception as exc:
+                last_error = repr(exc)
+                time.sleep(0.5)
 
-    try:
-        state = call_with_failover(
-            client.get_state_at_pos,
-            filepath,
-            entry["line"],
-            entry["character"],
+        return (
+            worker_id,
+            False,
+            f"recovery failed; first_error={first_error}; last_error={last_error}",
         )
 
-        for step in entry["proof_steps"]:
-
-            state = call_with_failover(
-                client.run,
-                state,
-                step
-            )
-        return True
-
-    except Exception as e:
-        return False
-
+@pytest.fixture(scope="session")
+def to_prove(parser: RocqParser, stdlib_filepaths: List[str]):
+    cache_file = 'tests/pytest_toprove.json'
+    if os.path.exists(cache_file):
+        with open(cache_file, 'r') as file:
+            return json.load(file)
+    
+    result = []
+    for filepath in stdlib_filepaths:
+        source = Source.from_local_path(filepath)
+        for element, steps in parser.extract_proofs_wo_check(source):
+            pos = offset_to_pos(source.content_utf8, element.span.ep)
+            entry = {
+                "filepath": source.path,
+                "line": pos.line,
+                "character": pos.character,
+                "steps": steps
+            }
+            result.append(entry)
+    
+    with open(cache_file, 'w') as file:
+        json.dump(result, file, indent=4)
+    return result
 
 @pytest.mark.validation
-def test_validation(host, port, stress_workers, stress_n):
-    selection = _load_subset_balanced(stress_n)
+def test_validation(host, port, stress_workers, to_prove, stress_n):
+    selection = random.sample(to_prove, k=stress_n)
     
     with concurrent.futures.ProcessPoolExecutor(max_workers=stress_workers) as ex:
-        future_to_expected = {
-            ex.submit(try_proof, entry, host, port): (entry['status'] == 'SUCCESS')
-            for entry in selection
-        }
+        future_to_expected = [
+            ex.submit(try_proof, entry, host, port) for entry in selection
+        ]
 
     for future in concurrent.futures.as_completed(future_to_expected):
-        expected = future_to_expected[future]
-        assert future.result() == expected
+        assert future.result()
+
+@pytest.mark.replay_mono
+def test_replay_mono(host, port, stress_workers, to_prove, stress_n):
+    selection = random.sample(to_prove, k=stress_n)
+    
+    for entry in selection:
+        client = Pytanque(host, port, mode=PytanqueMode.HTTP)
+        client.connect()
+        filepath = entry["filepath"]
+
+        state = client.get_state_at_pos(filepath, entry["line"], entry["character"])
+        if random.random() < 0.3:
+            kill_all_proc("pet-server")
+            time.sleep(2)
+        for step in entry["steps"]:
+            state = client.run(state, step, timeout=15)
+            if random.random() < 0.3:
+                kill_all_proc("pet-server")
+                time.sleep(5)
+
+def chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+@pytest.mark.replay_simultaneous
+def test_replay_simultaneous(host, port, stress_workers, to_prove, stress_n, redis_url):
+    selection = random.sample(to_prove, k=stress_n)
+
+    client = Pytanque(host, port, mode=PytanqueMode.HTTP)
+    client.connect()
+
+    for chunk in chunks(selection, stress_workers):
+        states = [None]*len(chunk)
+        for k, entry in enumerate(chunk):
+            state = client.get_state_at_pos(entry['filepath'], entry['line'], entry['character'], timeout=60)
+            states[k] = state
+        
+        iter_idx = 0
+
+        not_finish = True
+        inspect_goals = Inspect(InspectGoals())
+
+        while not_finish:
+            not_finish = True
+            if random.random() < 0.3:
+                kill_all_proc("pet-server")
+                time.sleep(2)
+            for k, entry in enumerate(chunk):
+                state = states[k]
+                if iter_idx < len(entry['steps']):
+                    not_finish = False
+                    tac = entry['steps'][iter_idx]
+                    new_state = client.run(state, tac, timeout=60)
+                    states[k] = new_state
+                else:
+                    tac = "idtac."
+                    new_state = client.run(state, tac, timeout=60)
+                    assert client.state_equal(new_state, state, inspect_goals)
+            iter_idx += 1
 
 @pytest.mark.replay
-def test_replay(host, port, stress_workers, stress_n):
-    selection = _load_subset_valid(stress_n)
+def test_replay(host, port, stress_workers, to_prove, stress_n, redis_url):
+    selection = random.sample(to_prove, k=stress_n)
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=stress_workers) as ex:
-        futures = [ex.submit(try_proof, entry, host, port, failure_rate=0.3) for entry in selection]
-    for f in concurrent.futures.as_completed(futures):
-        assert f.result()
+    # Reset control keys for a clean run
+    rc = Redis.from_url(redis_url, decode_responses=True)
+    rc.set("ctrl:state", "resume")
+    rc.set("ctrl:tasks_done", 0)
+    rc.set("ctrl:num_workers", 0)
+    rc.set("ctrl:paused_workers", 0)
+
+    stop_event = threading.Event()
+    coord_thread = threading.Thread(
+        target=coordinator,
+        args=(redis_url,),
+        kwargs={"fail_each_k": 100, "stop_event": stop_event},
+        daemon=True,
+    )
+    coord_thread.start()
+    # to avoid python warning, we set an mp_context
+    ctx = mp.get_context("forkserver")
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=stress_workers, mp_context=ctx) as ex:
+            futures = [
+                ex.submit(try_proof_control, entry, host, port, redis_url)
+                for entry in selection
+            ]
+            for f in concurrent.futures.as_completed(futures):
+                assert f.result()
+    finally:
+        stop_event.set()
+        coord_thread.join(timeout=1.0)
 
 
-@pytest.mark.manual_kill
-def test_manual_kill(host, port, stress_n):
-    selection = _load_subset_valid(stress_n)
+@pytest.mark.replay
+def test_replay_timeout_foo_parallel(host, port, stress_workers, server):
+    assert server == "OK"
+    filepath = str(Path(__file__).resolve().parents[1] / "examples" / "foo.v")
+    workers = max(1, stress_workers)
+    start_barrier = threading.Barrier(workers)
 
-    for entry in selection:
-        assert try_proof_kill(entry, host, port)
+    failures = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [
+            ex.submit(
+                try_timeout_replay_foo,
+                worker_id,
+                host,
+                port,
+                filepath,
+                start_barrier,
+            )
+            for worker_id in range(workers)
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            worker_id, ok, message = future.result()
+            if not ok:
+                failures.append(f"worker {worker_id:02d}: {message}")
+
+    assert not failures, "\n".join(failures)

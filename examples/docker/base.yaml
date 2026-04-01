@@ -1,0 +1,10 @@
+base_image: theostos/coq-server:8.20
+dependencies: []
+name: theostos/coq-server
+opam_env_path: /home/coq/.opam/4.13.1+flambda
+packages: []
+pins: []
+tag: "8.20"
+targets: []
+user: coq
+version: 8.20.1
