@@ -14,13 +14,14 @@ THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
-from putnam_agent.pydantic_agent import (  # noqa: E402
+from agent.pydantic_agent import (  # noqa: E402
     PutnamAgentSession,
     PutnamAgentTask,
     PutnamBenchProblem,
     ScalablePutnamRunner,
     build_scalable_putnam_agent,
     find_proof_end_position,
+    make_console_logger,
 )
 
 PUTNAM_ROOT = THIS_DIR / "putnam"
@@ -208,3 +209,20 @@ def test_scalable_runner_runs_many_tasks():
 
     assert len(outputs) == 2
     assert all("list_states" in output for output in outputs)
+
+
+def test_realtime_logging_feedback(capsys):
+    problem = _problem("coquelicot")
+    client = FakeClient()
+    logger = make_console_logger("demo-agent")
+    session = PutnamAgentSession.from_problem(client, problem, logger=logger)
+
+    session.get_goals(0)
+    session.run_tac(0, "idtac.")
+    session.safe_verify("Proof.\n  exact I.\nQed.")
+    out = capsys.readouterr().out
+
+    assert "initialized at state 0" in out
+    assert "get_goals(state_index=0)" in out
+    assert "run_tac(state_index=0, tactic='idtac.')" in out
+    assert "safe_verify finished: ok=True" in out

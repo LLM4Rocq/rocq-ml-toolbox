@@ -6,6 +6,7 @@ from .pydantic_agent import (
     build_scalable_putnam_agent,
     find_proof_end_position,
     iter_putnam_problems,
+    make_console_logger,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "find_proof_end_position",
     "iter_putnam_problems",
     "build_scalable_putnam_agent",
+    "make_console_logger",
 ]

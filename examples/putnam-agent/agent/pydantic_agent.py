@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable, Sequence
 
 from pydantic_ai import Agent, ModelRetry, RunContext
@@ -23,6 +25,17 @@ SYSTEM_PROMPT = (
     "- Call `end(final_proof)` only when the proof is ready.\n"
     "- `end` fails if SafeVerify does not pass."
 )
+
+
+def make_console_logger(prefix: str = "putnam-agent") -> Callable[[str], None]:
+    lock = Lock()
+
+    def _log(message: str) -> None:
+        stamp = time.strftime("%H:%M:%S")
+        with lock:
+            print(f"[{stamp}][{prefix}] {message}", flush=True)
+
+    return _log
 
 
 def find_proof_end_position(path: str | Path) -> tuple[int, int]:
@@ -124,6 +137,9 @@ class PutnamAgentSession:
     problem: PutnamBenchProblem
     timeout: float = 60.0
     states: list[Any] = field(default_factory=list)
+    logger: Callable[[str], None] | None = None
+    log_enabled: bool = False
+    log_prefix: str = "putnam-agent"
 
     @classmethod
     def from_problem(
@@ -133,6 +149,9 @@ class PutnamAgentSession:
         *,
         timeout: float = 60.0,
         connect: bool = True,
+        logger: Callable[[str], None] | None = None,
+        log_enabled: bool = False,
+        log_prefix: str | None = None,
     ) -> "PutnamAgentSession":
         if connect:
             client.connect()
@@ -142,7 +161,29 @@ class PutnamAgentSession:
             problem.proof_character,
             timeout=timeout,
         )
-        return cls(client=client, problem=problem, timeout=timeout, states=[initial_state])
+        session = cls(
+            client=client,
+            problem=problem,
+            timeout=timeout,
+            states=[initial_state],
+            logger=logger,
+            log_enabled=log_enabled,
+            log_prefix=log_prefix or problem.source_path.name,
+        )
+        session._log(
+            "initialized at state 0 "
+            f"({problem.source_path}:{problem.proof_line}:{problem.proof_character})"
+        )
+        return session
+
+    def _log(self, message: str) -> None:
+        if self.logger is not None:
+            self.logger(message)
+            return
+        if not self.log_enabled:
+            return
+        stamp = time.strftime("%H:%M:%S")
+        print(f"[{stamp}][{self.log_prefix}] {message}", flush=True)
 
     @property
     def available_state_indexes(self) -> list[int]:
@@ -155,6 +196,7 @@ class PutnamAgentSession:
 
     def get_goals(self, state_index: int = 0) -> dict[str, Any]:
         goals = [_goal_text(g) for g in self.client.goals(self._state(state_index), timeout=self.timeout)]
+        self._log(f"get_goals(state_index={state_index}) -> {len(goals)} goals")
         return {
             "state_index": state_index,
             "goals": goals,
@@ -163,9 +205,11 @@ class PutnamAgentSession:
 
     def run_tac(self, state_index: int, tactic: str) -> dict[str, Any]:
         state = self._state(state_index)
+        self._log(f"run_tac(state_index={state_index}, tactic={tactic!r})")
         try:
             new_state = self.client.run(state, tactic, timeout=self.timeout)
         except Exception as exc:
+            self._log(f"run_tac failed: {exc}")
             return {
                 "ok": False,
                 "source_state_index": state_index,
@@ -176,6 +220,7 @@ class PutnamAgentSession:
         self.states.append(new_state)
         new_state_index = len(self.states) - 1
         goals = [_goal_text(g) for g in self.client.goals(new_state, timeout=self.timeout)]
+        self._log(f"run_tac ok -> new_state_index={new_state_index}, goals={len(goals)}")
         return {
             "ok": True,
             "source_state_index": state_index,
@@ -201,6 +246,7 @@ class PutnamAgentSession:
         raise ValueError(f"No `{ADMITTED_TOKEN}` token found in source file: {self.problem.source_path}")
 
     def safe_verify(self, final_proof: str) -> dict[str, Any]:
+        self._log("safe_verify started")
         target_content = self._candidate_content(final_proof)
         target = self.client.tmp_file(content=target_content, root=str(self.problem.bench_root))
         report = self.client.safeverify(
@@ -210,17 +256,22 @@ class PutnamAgentSession:
             verbose=True,
         )
         summary = report.get("summary", {}) if isinstance(report, dict) else {}
+        ok = bool(report.get("ok", False)) if isinstance(report, dict) else False
+        self._log(f"safe_verify finished: ok={ok}, target={target}")
         return {
-            "ok": bool(report.get("ok", False)) if isinstance(report, dict) else False,
+            "ok": ok,
             "target_path": str(target),
             "summary": summary if isinstance(summary, dict) else {},
             "report": report if isinstance(report, dict) else {},
         }
 
     def end(self, final_proof: str) -> dict[str, Any]:
+        self._log("end called")
         result = self.safe_verify(final_proof)
         if not result["ok"]:
+            self._log("end rejected (SafeVerify failed)")
             raise ValueError(_render_safeverify_error(result.get("summary", {})))
+        self._log("end accepted")
         return result
 
 
@@ -294,13 +345,30 @@ class ScalablePutnamRunner:
     agent: Agent[PutnamAgentSession, str]
     timeout: float = 60.0
     max_concurrency: int = 8
+    logger: Callable[[str], None] | None = None
+    log_enabled: bool = False
+    log_prefix: str = "putnam-runner"
+
+    def _log(self, message: str) -> None:
+        if self.logger is not None:
+            self.logger(message)
+            return
+        if not self.log_enabled:
+            return
+        stamp = time.strftime("%H:%M:%S")
+        print(f"[{stamp}][{self.log_prefix}] {message}", flush=True)
 
     async def run_task(self, task: PutnamAgentTask) -> str:
+        self._log(f"task start: {task.problem.source_path.name}")
         client = self.client_factory()
         session = PutnamAgentSession.from_problem(client, task.problem, timeout=self.timeout)
         try:
             result = await self.agent.run(task.prompt, deps=session)
+            self._log(f"task done: {task.problem.source_path.name}")
             return str(result.output)
+        except Exception as exc:
+            self._log(f"task failed: {task.problem.source_path.name} ({exc})")
+            raise
         finally:
             close = getattr(client, "close", None)
             if callable(close):
