@@ -28,9 +28,9 @@ class PytanqueExtended(Pytanque):
         glob_file = GlobFile.from_json(result.json()['value'])
         return glob_file
     
-    def empty_file(self) -> str:
-        url = f"http://{self.host}:{self.port}/empty_file"
-        result = requests.get(url)
+    def tmp_file(self, content: Optional[str]=None) -> str:
+        url = f"http://{self.host}:{self.port}/tmp_file"
+        result = requests.post(url, {"content": content})
         path = result.json()['path']
         return path
 

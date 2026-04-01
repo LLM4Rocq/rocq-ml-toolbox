@@ -129,6 +129,9 @@ class SafeVerifyBody(BaseModel):
     save_path: Optional[str] = None
     verbose: bool = False
 
+class EmptyFileBody(BaseModel):
+    content: Optional[str] = None
+
 @app.post("/get_dump")
 def get_dump(body: GetAstBody):
     """
@@ -171,11 +174,14 @@ def safeverify(body: SafeVerifyBody):
     )
     return report.to_json()
 
-@app.get("/empty_file")
-def empty_file():
+@app.post("/tmp_file")
+def temp_file(body: EmptyFileBody):
     """
     Return the path of a new empty file.
     """
     fp = tempfile.NamedTemporaryFile(delete=False, suffix='.v')
+    if body.content:
+        with open(fp.name, 'w') as file:
+            file.write(body.content)
     output = {"path": fp.name}
     return output
