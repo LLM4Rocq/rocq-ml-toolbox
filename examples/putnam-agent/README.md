@@ -143,3 +143,23 @@ Notes:
 - Default problem: `examples/putnam-agent/putnam/mathcomp/putnam_1965_a5.v`
 - Default model: `moonshotai/kimi-k2.5`
 - Logs are enabled by default for real-time feedback (`--quiet` to disable)
+
+## DocQ Agent Quickstart
+
+This second agent workflow focuses on library/docstring exploration plus intermediate-lemma insertion on a virtual document DAG.
+
+```bash
+OPENROUTER_API_KEY=sk-or-... \
+DOCQ_SEARCH_BASE_URL=http://127.0.0.1:9000 \
+python examples/putnam-agent/run_docq_agent_openrouter.py \
+  --source /home/rocq/.opam/4.14.2+flambda/lib/coq/user-contrib/MathComp/ssreflect/ssrbool.v \
+  --env coq-mathcomp \
+  --host 127.0.0.1 \
+  --port 5000
+```
+
+Optional semantic search env vars:
+
+- `DOCQ_SEARCH_BASE_URL` (required to enable `semantic_doc_search`)
+- `DOCQ_SEARCH_ROUTE` (default: `/search`)
+- `DOCQ_SEARCH_API_KEY` (optional bearer token)
