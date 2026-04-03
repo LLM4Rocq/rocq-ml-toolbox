@@ -10,6 +10,7 @@ END_PROOF_TOKENS = ("Qed.", "Admitted.", "Defined.", "Abort.")
 TARGET_START_RE = re.compile(r"^\s*(Theorem|Lemma|Fact|Proposition|Corollary)\b")
 IMPORT_RE = re.compile(r"^\s*(From\s+\S+\s+Require\s+(Import|Export)|Require\s+Import|Import|Export)\b")
 IDENT_RE = re.compile(r"^[A-Za-z0-9_.]+$")
+MutationValidator = Callable[[int, str], tuple[bool, str | None]]
 
 
 def _join_lines(lines: list[str], *, trailing_newline: bool = True) -> str:
@@ -242,11 +243,13 @@ class DocumentManager:
         *,
         timeout: float = 60.0,
         logger: Callable[[str], None] | None = None,
+        mutation_validator: MutationValidator | None = None,
     ):
         self.client = client
         self.source_path = Path(source_path).resolve()
         self.timeout = timeout
         self.logger = logger
+        self.mutation_validator = mutation_validator
 
         root_content = self.source_path.read_text(encoding="utf-8")
         self.nodes: dict[int, DocumentNode] = {
@@ -307,6 +310,15 @@ class DocumentManager:
         )
         self.sessions[new_doc_id] = self._new_branch_session(doc_id=new_doc_id, content=content)
         self.head_doc_id = new_doc_id
+        if self.mutation_validator is not None:
+            ok, error = self.mutation_validator(new_doc_id, label)
+            if not ok:
+                self.nodes.pop(new_doc_id, None)
+                self.sessions.pop(new_doc_id, None)
+                self._next_doc_id = new_doc_id
+                self.head_doc_id = base_doc_id
+                detail = error or "fresh-session validation failed"
+                raise ValueError(f"Mutation `{label}` rejected by fresh-session validation: {detail}")
         self._log(f"new doc node: {new_doc_id} (from {base_doc_id}) label={label!r} branched={branched}")
         return {
             "ok": True,

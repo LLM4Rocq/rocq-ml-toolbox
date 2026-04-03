@@ -9,7 +9,7 @@ from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.usage import RunUsage, UsageLimits
 
-from .doc_manager import BranchSession, DocumentManager
+from .doc_manager import BranchSession, DocumentManager, parse_last_target_layout
 from .docstring_tools import SemanticDocSearchClient
 from .library_tools import TocExplorer, read_source_via_client
 
@@ -35,6 +35,7 @@ LEMMA_SUBAGENT_SYSTEM_PROMPT = (
     "- `explore_toc`, `semantic_doc_search`, `read_source_file`\n"
     "- `show_workspace`, `read_workspace_source`\n"
     "- `list_states`, `get_goals`, `run_tac`\n"
+    "- `require_import(libname, source)` if the lemma proof needs a new import.\n"
     "- `abort(explanation)` if the lemma is likely wrong/unprovable.\n"
     "Goal: finish with no remaining goals."
 )
@@ -47,6 +48,7 @@ class LemmaSubSession:
     toc_explorer: TocExplorer
     semantic_search: SemanticDocSearchClient | None = None
     abort_reason: str | None = None
+    required_imports: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -160,6 +162,26 @@ def build_docq_subagent(model: Any = None, *, retries: int = 1) -> Agent[LemmaSu
             raise ModelRetry(str(exc)) from exc
 
     @agent.tool
+    def require_import(
+        ctx: RunContext[LemmaSubSession],
+        libname: str = "Stdlib",
+        source: str = "List",
+    ) -> dict[str, Any]:
+        if not _IDENT_RE.match(libname):
+            raise ModelRetry(f"Invalid libname={libname!r}.")
+        if not _IDENT_RE.match(source):
+            raise ModelRetry(f"Invalid source={source!r}.")
+        pair = (libname, source)
+        if pair not in ctx.deps.required_imports:
+            ctx.deps.required_imports.append(pair)
+        return {
+            "ok": True,
+            "required_imports": [
+                {"libname": lib, "source": src} for (lib, src) in ctx.deps.required_imports
+            ],
+        }
+
+    @agent.tool
     def abort(ctx: RunContext[LemmaSubSession], explanation: str = "not provable") -> str:
         ctx.deps.abort_reason = explanation.strip() or "not provable"
         return f"ABORT: {ctx.deps.abort_reason}"
@@ -213,7 +235,7 @@ class DocqAgentSession:
                 api_key=semantic_api_key,
                 timeout=timeout,
             )
-        return cls(
+        session = cls(
             client=client,
             source_path=source,
             env=env,
@@ -227,10 +249,98 @@ class DocqAgentSession:
             subagent_model=subagent_model,
             subagent_retries=subagent_retries,
         )
+        session.doc_manager.mutation_validator = session._validate_mutation_in_fresh_session
+        return session
 
     def _log(self, message: str) -> None:
         if self.logger:
             self.logger(message)
+
+    def _try_make_fresh_client(self) -> Any | None:
+        host = getattr(self.client, "host", None)
+        port = getattr(self.client, "port", None)
+        if host is None or port is None:
+            return None
+        try:
+            fresh = type(self.client)(host, port)
+        except Exception:
+            return None
+        if hasattr(self.client, "timeout_http") and hasattr(fresh, "timeout_http"):
+            try:
+                fresh.timeout_http = self.client.timeout_http
+            except Exception:
+                pass
+        connect = getattr(fresh, "connect", None)
+        if callable(connect):
+            connect()
+        return fresh
+
+    @staticmethod
+    def _close_client_quietly(client: Any) -> None:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    def _validate_mutation_in_fresh_session(self, doc_id: int, label: str) -> tuple[bool, str | None]:
+        fresh = self._try_make_fresh_client()
+        if fresh is None:
+            return True, None
+        try:
+            node = self.doc_manager.nodes.get(doc_id)
+            if node is None:
+                return False, f"Unknown doc_id={doc_id} during validation."
+            layout = parse_last_target_layout(node.content)
+            tmp_path = fresh.tmp_file(content=node.content, root=str(self.source_path.parent))
+            state0 = fresh.get_state_at_pos(
+                str(tmp_path),
+                layout.proof_line,
+                layout.proof_character,
+                timeout=self.timeout,
+            )
+            if label.startswith("add_lemma:"):
+                lemma_name = label.split(":", 1)[1].strip()
+                if lemma_name:
+                    fresh.run(state0, f"pose proof ({lemma_name}).", timeout=self.timeout)
+            return True, None
+        except Exception as exc:
+            return False, str(exc)
+        finally:
+            self._close_client_quietly(fresh)
+
+    @staticmethod
+    def _normalize_required_imports(raw: Any) -> list[tuple[str, str]]:
+        if not isinstance(raw, list):
+            return []
+        out: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            libname = item.get("libname")
+            source = item.get("source")
+            if not isinstance(libname, str) or not isinstance(source, str):
+                continue
+            libname = libname.strip()
+            source = source.strip()
+            if not _IDENT_RE.match(libname) or not _IDENT_RE.match(source):
+                continue
+            pair = (libname, source)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            out.append(pair)
+        return out
+
+    def _doc_has_import(self, *, doc_id: int, libname: str, source: str) -> bool:
+        node = self.doc_manager.nodes[doc_id]
+        layout = parse_last_target_layout(node.content)
+        pattern = re.compile(
+            rf"^\s*From\s+{re.escape(libname)}\s+Require\s+Import\s+{re.escape(source)}\s*\.\s*$"
+        )
+        return any(bool(pattern.match(line)) for line in layout.prefix_lines)
 
     def remaining_tool_calls(self) -> int | None:
         limit = self.usage_limits.tool_calls_limit
@@ -260,7 +370,7 @@ class DocqAgentSession:
             limits = UsageLimits(tool_calls_limit=remaining)
 
         try:
-            subagent.run_sync(
+            _ = subagent.run_sync(
                 prompt,
                 deps=deps,
                 usage=self.usage,
@@ -278,7 +388,15 @@ class DocqAgentSession:
         goals = sub_branch.get_goals(latest).get("goals", [])
         if goals:
             return {"ok": False, "error": "Sub-agent did not finish the lemma proof."}
-        return {"ok": True, "proof_script": sub_branch.proof_script(latest), "state_index": latest}
+        required_imports = [
+            {"libname": libname, "source": source} for (libname, source) in deps.required_imports
+        ]
+        return {
+            "ok": True,
+            "proof_script": sub_branch.proof_script(latest),
+            "state_index": latest,
+            "required_imports": required_imports,
+        }
 
     def add_intermediate_lemma(
         self,
@@ -374,9 +492,33 @@ class DocqAgentSession:
             }
 
         proof_script = str(sub_result.get("proof_script", "")).strip()
+        required_imports = self._normalize_required_imports(sub_result.get("required_imports"))
+        base_doc_id = pending.base_doc_id
+        applied_imports: list[dict[str, Any]] = []
+        for (libname, source) in required_imports:
+            if self._doc_has_import(doc_id=base_doc_id, libname=libname, source=source):
+                continue
+            try:
+                added = self.doc_manager.add_import(libname=libname, source=source, doc_id=base_doc_id)
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "phase": "prove",
+                    "lemma_name": lemma_name,
+                    "error": f"Failed to apply required import `{libname}.{source}`: {exc}",
+                    "pending": True,
+                }
+            base_doc_id = int(added["doc_id"])
+            applied_imports.append(
+                {
+                    "libname": libname,
+                    "source": source,
+                    "doc_id": base_doc_id,
+                }
+            )
         try:
             reg = self.doc_manager.register_proved_lemma(
-                base_doc_id=pending.base_doc_id,
+                base_doc_id=base_doc_id,
                 lemma_name=pending.lemma_name,
                 lemma_type=pending.lemma_type,
                 proof_script=proof_script,
@@ -394,6 +536,8 @@ class DocqAgentSession:
         reg["phase"] = "prove"
         reg["lemma_name"] = lemma_name
         reg["proof_script"] = proof_script
+        if applied_imports:
+            reg["applied_imports"] = applied_imports
         return reg
 
     def drop_pending_intermediate_lemma(self, *, lemma_name: str) -> dict[str, Any]:
