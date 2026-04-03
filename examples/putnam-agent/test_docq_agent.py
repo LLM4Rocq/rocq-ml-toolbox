@@ -115,6 +115,78 @@ class FakeClient:
         }
 
 
+class FakeLogicalPathClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.memory_files: dict[str, str] = {
+            "mathcomp/boot/ssrbool.v": "Lemma eqxx : forall b : bool, b == b.\nProof.\nAdmitted.\n",
+        }
+
+    def access_libraries(
+        self,
+        env: str,
+        *,
+        use_cache: bool = True,
+        include_theories: bool = True,
+        include_user_contrib: bool = True,
+    ) -> dict[str, Any]:
+        return {
+            "env": env,
+            "root_id": "dir:ROOT",
+            "nodes": [
+                {
+                    "id": "dir:ROOT",
+                    "type": "directory",
+                    "name": "ROOT",
+                    "path": "",
+                    "parent_id": None,
+                    "children_ids": ["dir:mathcomp"],
+                },
+                {
+                    "id": "dir:mathcomp",
+                    "type": "directory",
+                    "name": "mathcomp",
+                    "path": "mathcomp",
+                    "parent_id": "dir:ROOT",
+                    "children_ids": ["dir:mathcomp/boot"],
+                },
+                {
+                    "id": "dir:mathcomp/boot",
+                    "type": "directory",
+                    "name": "boot",
+                    "path": "mathcomp/boot",
+                    "parent_id": "dir:mathcomp",
+                    "children_ids": ["file:mathcomp/boot/ssrbool"],
+                },
+                {
+                    "id": "file:mathcomp/boot/ssrbool",
+                    "type": "file",
+                    "name": "ssrbool",
+                    "path": "mathcomp/boot/ssrbool",
+                    "parent_id": "dir:mathcomp/boot",
+                    "children_ids": [],
+                    "line_count": 3,
+                },
+            ],
+            "file_index": {},
+        }
+
+    def read_file(self, path: str, *, offset: int = 0, max_chars: int = 20000) -> dict[str, Any]:
+        if path not in self.memory_files:
+            raise RuntimeError(f"not found: {path}")
+        content = self.memory_files[path]
+        chunk = content[offset : offset + max_chars]
+        next_offset = offset + len(chunk)
+        return {
+            "path": path,
+            "content": chunk,
+            "offset": offset,
+            "next_offset": next_offset,
+            "eof": next_offset >= len(content),
+            "total_chars": len(content),
+        }
+
+
 def _source_file(tmp_path: Path) -> Path:
     source = tmp_path / "demo.v"
     source.write_text(
@@ -413,3 +485,25 @@ def test_toc_explorer_and_read_source_trim(tmp_path: Path):
     around = read_source_via_client(client, str(source), line=8, before=1, after=1)
     assert around["mode"] == "around_line"
     assert around["start_line"] == 7
+
+
+def test_toc_explorer_handles_logical_source_paths():
+    client = FakeLogicalPathClient()
+    explorer = TocExplorer(client=client, env="coq-mathcomp")
+    out = explorer.explore(["mathcomp", "boot"])
+    assert out["ok"] is True
+    assert len(out["entries"]) == 1
+    entry = out["entries"][0]
+    assert entry["kind"] == "file"
+    assert entry["path"] == "mathcomp/boot/ssrbool"
+    assert entry["is_logical_path"] is True
+    assert entry["suggested_read_path"] == "mathcomp/boot/ssrbool.v"
+
+
+def test_read_source_via_client_resolves_missing_v_suffix():
+    client = FakeLogicalPathClient()
+    out = read_source_via_client(client, "mathcomp/boot/ssrbool")
+    assert out["mode"] == "full"
+    assert out["requested_path"] == "mathcomp/boot/ssrbool"
+    assert out["resolved_path"] == "mathcomp/boot/ssrbool.v"
+    assert "eqxx" in out["content"]
