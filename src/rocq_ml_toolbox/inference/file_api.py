@@ -42,6 +42,7 @@ class FsAccessMode(StrEnum):
 class FileAccessConfig:
     mode: FsAccessMode
     coq_lib_path: Path
+    read_allow_paths: tuple[Path, ...] = ()
 
 
 def resolve_coq_lib_path(override: str | None) -> Path:
@@ -68,14 +69,35 @@ def _assert_read_allowed(path: Path, cfg: FileAccessConfig) -> Path:
         return resolved
     if _is_within(resolved, cfg.coq_lib_path):
         return resolved
-    raise HTTPException(status_code=403, detail="Read denied by fs-access policy.")
+    for allowed in cfg.read_allow_paths:
+        if _is_within(resolved, allowed):
+            return resolved
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error": "Read denied by fs-access policy.",
+            "mode": cfg.mode.value,
+            "path": str(resolved),
+            "coq_lib_path": str(cfg.coq_lib_path),
+            "read_allow_paths": [str(p) for p in cfg.read_allow_paths],
+            "hint": "Use --fs-read-allow <path> (repeatable) or --fs-access-mode rw_anywhere.",
+        },
+    )
 
 
 def _assert_write_allowed(path: Path, cfg: FileAccessConfig) -> Path:
     resolved = path.expanduser().resolve()
     if cfg.mode == FsAccessMode.RW_ANYWHERE:
         return resolved
-    raise HTTPException(status_code=403, detail="Write denied by fs-access policy.")
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error": "Write denied by fs-access policy.",
+            "mode": cfg.mode.value,
+            "path": str(resolved),
+            "hint": "Use --fs-access-mode rw_anywhere to enable writes.",
+        },
+    )
 
 
 def _file_candidates_from_node_path(coq_lib_path: Path, node_path: str) -> list[Path]:

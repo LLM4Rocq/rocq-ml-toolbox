@@ -180,11 +180,27 @@ def main(argv: Optional[List[str]] = None) -> None:
         default=os.environ.get("COQ_LIB_PATH"),
         help="Optional override for Coq lib root (defaults to `coqc -where`).",
     )
+    p.add_argument(
+        "--fs-read-allow",
+        action="append",
+        default=None,
+        help="Additional read-allowed root path (repeatable) in read_lib_only mode.",
+    )
     p.add_argument("--app", default=DEFAULT_APP)
     p.add_argument("--config", default=DEFAULT_CONFIG)
 
     args = p.parse_args(argv)
     redis_url = redis_url_from_port(args.redis_port)
+
+    if args.fs_read_allow is not None:
+        fs_read_allow_paths = list(args.fs_read_allow)
+    else:
+        env_paths_raw = os.environ.get("FS_READ_ALLOW_PATHS", "[]")
+        try:
+            parsed = json.loads(env_paths_raw)
+        except Exception:
+            parsed = []
+        fs_read_allow_paths = [str(p) for p in parsed] if isinstance(parsed, list) else []
     
     uvicorn_cmd = [
         "uvicorn",
@@ -212,6 +228,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     env["FS_ACCESS_MODE"] = str(args.fs_access_mode)
     if args.coq_lib_path:
         env["COQ_LIB_PATH"] = str(args.coq_lib_path)
+    env["FS_READ_ALLOW_PATHS"] = json.dumps(fs_read_allow_paths)
     
     first_pet_port = args.pet_server_start_port
     all_required_ports = list(range(first_pet_port, first_pet_port+ args.num_pet_server))

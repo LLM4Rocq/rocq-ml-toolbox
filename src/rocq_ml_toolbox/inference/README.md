@@ -67,4 +67,9 @@ Most proof interaction calls (`run`, `goals`, `start`, `state_hash`, etc.) go th
 - `--session-cache-keep-feedback`: keep `State.feedback` in cache (off by default).
 - `--pet-server-cmd`: override `pet-server` executable path.
 - `--fs-access-mode`: immutable file policy for read/write endpoints (`read_lib_only` or `rw_anywhere`).
+- `--fs-read-allow`: additional read-allowed root path in `read_lib_only` mode (repeatable).
 - `--coq-lib-path`: optional override for Coq lib root (otherwise resolved from `coqc -where`).
+
+Policy summary:
+- `read_lib_only` (default): reads allowed under `coqc -where` plus any `--fs-read-allow` roots, writes denied.
+- `rw_anywhere`: reads/writes allowed anywhere.

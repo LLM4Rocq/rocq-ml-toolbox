@@ -14,9 +14,14 @@ def _request_with_config(
     *,
     mode: inference_server.FsAccessMode,
     coq_lib_path: Path,
+    read_allow_paths: tuple[Path, ...] = (),
 ):
     state = SimpleNamespace(
-        file_access=inference_server.FileAccessConfig(mode=mode, coq_lib_path=coq_lib_path),
+        file_access=inference_server.FileAccessConfig(
+            mode=mode,
+            coq_lib_path=coq_lib_path,
+            read_allow_paths=read_allow_paths,
+        ),
         toc_cache={},
     )
     return SimpleNamespace(app=SimpleNamespace(state=state))
@@ -108,6 +113,26 @@ def test_read_file_chunking(tmp_path: Path):
     assert second["content"] == "cdef"
     assert second["eof"] is True
     assert second["total_chars"] == 6
+
+
+def test_read_file_allowed_by_fs_read_allow(tmp_path: Path):
+    coq_lib = tmp_path / "coq-lib"
+    coq_lib.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    p = outside / "a.v"
+    p.write_text("demo", encoding="utf-8")
+    req = _request_with_config(
+        mode=inference_server.FsAccessMode.READ_LIB_ONLY,
+        coq_lib_path=coq_lib,
+        read_allow_paths=(outside,),
+    )
+
+    out = inference_server.read_file(
+        inference_server.ReadFileBody(path=str(p), offset=0, max_chars=10),
+        req,
+    )
+    assert out["content"] == "demo"
 
 
 def test_write_file_policy_and_rw_mode(tmp_path: Path):

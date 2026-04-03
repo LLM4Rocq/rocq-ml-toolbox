@@ -5,6 +5,7 @@ import logging
 import os
 import tempfile
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
@@ -72,6 +73,14 @@ async def lifespan(app: FastAPI):
 
     coq_lib_override = os.environ.get("COQ_LIB_PATH")
     coq_lib_path = resolve_coq_lib_path(coq_lib_override)
+    read_allow_raw = os.environ.get("FS_READ_ALLOW_PATHS", "[]")
+    try:
+        parsed_read_allow = json.loads(read_allow_raw)
+    except Exception as exc:
+        raise RuntimeError(f"Invalid FS_READ_ALLOW_PATHS value: {read_allow_raw!r}") from exc
+    if not isinstance(parsed_read_allow, list):
+        raise RuntimeError("FS_READ_ALLOW_PATHS must be a JSON list of paths.")
+    read_allow_paths: tuple[Path, ...] = tuple(Path(str(p)).expanduser().resolve() for p in parsed_read_allow)
 
     sm = SessionManager(
         redis_url=redis_url,
@@ -82,7 +91,11 @@ async def lifespan(app: FastAPI):
         session_cleanup_interval_s=session_cleanup_interval_seconds,
     )
     app.state.sm = sm
-    app.state.file_access = FileAccessConfig(mode=fs_mode, coq_lib_path=coq_lib_path)
+    app.state.file_access = FileAccessConfig(
+        mode=fs_mode,
+        coq_lib_path=coq_lib_path,
+        read_allow_paths=read_allow_paths,
+    )
     app.state.toc_cache: dict[tuple[str, str, bool, bool], dict[str, Any]] = {}
     yield
 
