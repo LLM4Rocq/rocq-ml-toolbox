@@ -152,6 +152,16 @@ It supports both forward and inverse edits on the virtual workspace:
 - `add_import` / `remove_import`
 - `add_intermediate_lemma` / `remove_intermediate_lemma`
 
+It also exposes explicit branch/DAG controls:
+
+- `list_docs`, `checkout_doc`, `show_doc`
+- all state and mutation tools accept optional `doc_id`
+- phased intermediate lemma flow:
+  - `prepare_intermediate_lemma`
+  - `prove_intermediate_lemma`
+  - `drop_pending_intermediate_lemma`
+  - `list_pending_intermediate_lemmas`
+
 ```bash
 OPENROUTER_API_KEY=sk-or-... \
 DOCQ_SEARCH_BASE_URL=http://127.0.0.1:9000 \
