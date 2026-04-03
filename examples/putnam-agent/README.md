@@ -162,6 +162,13 @@ It also exposes explicit branch/DAG controls:
   - `drop_pending_intermediate_lemma`
   - `list_pending_intermediate_lemmas`
 
+Validation and dependency propagation notes:
+
+- intermediate-lemma sub-agent can declare imports with `require_import(libname, source)`;
+  the main agent applies these imports before registering the proved lemma.
+- every document mutation (`add/remove import`, `add/remove lemma`) is revalidated in a fresh
+  server session; rejected mutations are rolled back automatically.
+
 TOC note:
 
 - Some env-level TOCs expose logical module paths without `.v` suffix (for example `mathcomp/boot/ssrbool`).

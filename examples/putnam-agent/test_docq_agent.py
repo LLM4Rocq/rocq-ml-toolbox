@@ -269,6 +269,21 @@ def test_document_manager_remove_import(tmp_path: Path):
         manager.remove_import(libname="MathComp", source="ssreflect")
 
 
+def test_document_manager_mutation_validator_rejects_and_rolls_back(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(
+        client,
+        _source_file(tmp_path),
+        timeout=5.0,
+        mutation_validator=lambda _doc_id, _label: (False, "reject"),
+    )
+    with pytest.raises(ValueError, match="fresh-session validation"):
+        manager.add_import(libname="MathComp", source="ssreflect")
+    assert manager.head_doc_id == 0
+    assert sorted(manager.nodes.keys()) == [0]
+    assert sorted(manager.sessions.keys()) == [0]
+
+
 def test_docq_add_intermediate_lemma_success_and_abort(tmp_path: Path):
     client = FakeClient()
     session = DocqAgentSession.from_source(
@@ -337,6 +352,33 @@ def test_docq_prepare_prove_drop_intermediate_lemma(tmp_path: Path):
     assert failed["pending"] is True
     dropped = session.drop_pending_intermediate_lemma(lemma_name="helper_bad")
     assert dropped["ok"] is True
+
+
+def test_docq_prove_intermediate_applies_required_imports(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    prep = session.prepare_intermediate_lemma(lemma_type="True", lemma_name="helper_with_import")
+    assert prep["ok"] is True
+    session.run_lemma_subagent = lambda **kwargs: {  # type: ignore[method-assign]
+        "ok": True,
+        "proof_script": "exact I.",
+        "required_imports": [
+            {"libname": "MathComp", "source": "ssreflect"},
+            {"libname": "MathComp", "source": "ssreflect"},
+        ],
+    }
+    proved = session.prove_intermediate_lemma(lemma_name="helper_with_import")
+    assert proved["ok"] is True
+    assert proved["applied_imports"][0]["libname"] == "MathComp"
+    assert proved["applied_imports"][0]["source"] == "ssreflect"
+    workspace = session.doc_manager.show_workspace()
+    assert "From MathComp Require Import ssreflect." in workspace["content"]
 
 
 def test_document_manager_remove_intermediate_lemma(tmp_path: Path):
@@ -410,6 +452,7 @@ def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
                 "list_states",
                 "get_goals",
                 "run_tac",
+                "require_import",
                 "abort",
             ]
         )
@@ -430,6 +473,7 @@ def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
     assert "list_states" in payload
     assert "get_goals" in payload
     assert "run_tac" in payload
+    assert "require_import" in payload
     assert "abort" in payload
 
 
