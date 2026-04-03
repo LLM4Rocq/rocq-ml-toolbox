@@ -8,6 +8,10 @@ from .pydantic_agent import (
     iter_putnam_problems,
     make_console_logger,
 )
+from .doc_manager import BranchSession, DocumentManager
+from .docq_agent import DocqAgentSession, build_docq_agent, build_docq_subagent
+from .docstring_tools import SemanticDocSearchClient
+from .library_tools import TocExplorer, read_source_via_client
 
 __all__ = [
     "PutnamBenchProblem",
@@ -18,4 +22,12 @@ __all__ = [
     "iter_putnam_problems",
     "build_scalable_putnam_agent",
     "make_console_logger",
+    "BranchSession",
+    "DocumentManager",
+    "DocqAgentSession",
+    "build_docq_agent",
+    "build_docq_subagent",
+    "SemanticDocSearchClient",
+    "TocExplorer",
+    "read_source_via_client",
 ]
