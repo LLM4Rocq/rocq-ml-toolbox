@@ -15,7 +15,12 @@ from pydantic_ai.models.test import TestModel
 THIS_DIR = Path(__file__).resolve().parent
 
 from agent.doc_manager import DocumentManager  # noqa: E402
-from agent.docq_agent import DocqAgentSession, LemmaSubSession, build_docq_subagent  # noqa: E402
+from agent.docq_agent import (  # noqa: E402
+    DocqAgentSession,
+    LemmaSubSession,
+    build_docq_agent,
+    build_docq_subagent,
+)
 from agent.library_tools import TocExplorer, read_source_via_client  # noqa: E402
 
 
@@ -160,6 +165,23 @@ def test_document_manager_auto_branch_on_mutation_from_older_doc(tmp_path: Path)
     assert manager.head_doc_id == 2
 
 
+def test_document_manager_checkout_and_list_docs(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    first = manager.add_import(libname="MathComp", source="ssreflect")
+    second = manager.add_import(libname="Stdlib", source="Bool", doc_id=0)
+
+    docs = manager.list_docs()
+    assert {d["doc_id"] for d in docs} == {0, 1, 2}
+    root = next(d for d in docs if d["doc_id"] == 0)
+    assert sorted(root["children_doc_ids"]) == [1, 2]
+
+    switched = manager.checkout_doc(doc_id=first["doc_id"])
+    assert switched["head_doc_id"] == first["doc_id"]
+    shown = manager.show_doc(doc_id=second["doc_id"])
+    assert shown["doc_id"] == second["doc_id"]
+
+
 def test_document_manager_remove_import(tmp_path: Path):
     client = FakeClient()
     manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
@@ -206,7 +228,43 @@ def test_docq_add_intermediate_lemma_success_and_abort(tmp_path: Path):
     failed = session_abort.add_intermediate_lemma(lemma_type="False")
     assert failed["ok"] is False
     assert failed["aborted"] is True
+    assert failed["pending"] is True
+    assert session_abort.list_pending_intermediate_lemmas()
     assert session_abort.doc_manager.head_doc_id == 0
+
+
+def test_docq_prepare_prove_drop_intermediate_lemma(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    prep = session.prepare_intermediate_lemma(lemma_type="True", lemma_name="helper_x")
+    assert prep["ok"] is True
+    assert prep["lemma_name"] == "helper_x"
+    assert len(session.list_pending_intermediate_lemmas()) == 1
+
+    session.run_lemma_subagent = lambda **kwargs: {"ok": True, "proof_script": "exact I."}  # type: ignore[method-assign]
+    proved = session.prove_intermediate_lemma(lemma_name="helper_x")
+    assert proved["ok"] is True
+    assert proved["lemma_name"] == "helper_x"
+    assert session.list_pending_intermediate_lemmas() == []
+
+    prep2 = session.prepare_intermediate_lemma(lemma_type="False", lemma_name="helper_bad")
+    assert prep2["ok"] is True
+    session.run_lemma_subagent = lambda **kwargs: {  # type: ignore[method-assign]
+        "ok": False,
+        "error": "not provable",
+        "aborted": True,
+    }
+    failed = session.prove_intermediate_lemma(lemma_name="helper_bad")
+    assert failed["ok"] is False
+    assert failed["pending"] is True
+    dropped = session.drop_pending_intermediate_lemma(lemma_name="helper_bad")
+    assert dropped["ok"] is True
 
 
 def test_document_manager_remove_intermediate_lemma(tmp_path: Path):
@@ -303,12 +361,49 @@ def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
     assert "abort" in payload
 
 
+def test_docq_agent_has_branch_and_pending_tools(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    agent = build_docq_agent(
+        model=TestModel(
+            call_tools=[
+                "list_docs",
+                "show_workspace",
+                "checkout_doc",
+                "list_states",
+                "get_goals",
+                "run_tac",
+                "add_import",
+                "remove_import",
+                "prepare_intermediate_lemma",
+                "list_pending_intermediate_lemmas",
+                "drop_pending_intermediate_lemma",
+            ]
+        )
+    )
+    result = agent.run_sync("Use branch and pending tools.", deps=session)
+    payload = json.loads(result.output)
+    assert "list_docs" in payload
+    assert "show_workspace" in payload
+    assert "checkout_doc" in payload
+    assert "prepare_intermediate_lemma" in payload
+    assert "list_pending_intermediate_lemmas" in payload
+    assert "drop_pending_intermediate_lemma" in payload
+
+
 def test_toc_explorer_and_read_source_trim(tmp_path: Path):
     client = FakeClient()
     source = _source_file(tmp_path)
     explorer = TocExplorer(client=client, env="coq-demo")
     root = explorer.explore([])
     assert root["ok"] is True
+    assert sorted(root["root_entries"]) == ["Demo.v", "theories"]
     assert any(entry["kind"] == "file" and entry["line_count"] == 42 for entry in root["entries"])
 
     full = read_source_via_client(client, str(source))

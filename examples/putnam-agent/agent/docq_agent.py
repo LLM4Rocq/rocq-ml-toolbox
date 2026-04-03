@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -15,13 +16,15 @@ from .library_tools import TocExplorer, read_source_via_client
 DOCQ_SYSTEM_PROMPT = (
     "You are editing and proving Rocq code with strict tool usage.\n"
     "Rules:\n"
-    "- Use `explore_toc` incrementally (do not request global dumps repeatedly).\n"
+    "- Use `explore_toc` incrementally and discover root entries first.\n"
     "- Use `read_source_file` to inspect library files with optional line window.\n"
-    "- Use `show_workspace` to inspect the current virtual manipulated file.\n"
-    "- Use `run_tac` from any known state index.\n"
-    "- For imports, only call `add_import(libname, source)`.\n"
-    "- If an import is problematic, call `remove_import(libname, source)`.\n"
-    "- For helper statements, call `add_intermediate_lemma(lemma_type)`.\n"
+    "- Use `show_workspace` or `show_doc(doc_id)` to inspect virtual files.\n"
+    "- Use `list_docs` and `checkout_doc` to navigate document branches.\n"
+    "- Use `run_tac` from any known state index (optionally scoped by `doc_id`).\n"
+    "- For imports, use `add_import(libname, source, doc_id?)` and `remove_import(...)`.\n"
+    "- For helper statements, prefer phased tools:\n"
+    "  `prepare_intermediate_lemma` -> `prove_intermediate_lemma` -> `drop_pending_intermediate_lemma`.\n"
+    "- Convenience path `add_intermediate_lemma` is still available.\n"
     "- If a helper lemma is problematic, call `remove_intermediate_lemma(lemma_name)`.\n"
     "- If stuck on lemma proving, the sub-agent can abort and report why."
 )
@@ -44,6 +47,17 @@ class LemmaSubSession:
     toc_explorer: TocExplorer
     semantic_search: SemanticDocSearchClient | None = None
     abort_reason: str | None = None
+
+
+@dataclass
+class PendingLemma:
+    base_doc_id: int
+    lemma_name: str
+    lemma_type: str
+    sub_branch: BranchSession
+
+
+_IDENT_RE = re.compile(r"^[A-Za-z0-9_.]+$")
 
 
 def build_docq_subagent(model: Any = None, *, retries: int = 1) -> Agent[LemmaSubSession, str]:
@@ -167,6 +181,7 @@ class DocqAgentSession:
     logger: Callable[[str], None] | None = None
     subagent_model: Any = None
     subagent_retries: int = 1
+    pending_lemmas: dict[str, PendingLemma] = field(default_factory=dict)
 
     @classmethod
     def from_source(
@@ -270,45 +285,147 @@ class DocqAgentSession:
         *,
         lemma_type: str,
         prompt: str | None = None,
+        lemma_name: str | None = None,
         doc_id: int | None = None,
     ) -> dict[str, Any]:
-        lemma_name = self.doc_manager.next_lemma_name()
+        prep = self.prepare_intermediate_lemma(
+            lemma_type=lemma_type,
+            lemma_name=lemma_name,
+            doc_id=doc_id,
+        )
+        if not prep.get("ok", False):
+            return prep
+        proved = self.prove_intermediate_lemma(
+            lemma_name=str(prep["lemma_name"]),
+            prompt=prompt,
+        )
+        if not proved.get("ok", False):
+            proved["prepared"] = True
+        return proved
+
+    def prepare_intermediate_lemma(
+        self,
+        *,
+        lemma_type: str,
+        lemma_name: str | None = None,
+        doc_id: int | None = None,
+    ) -> dict[str, Any]:
+        name = (lemma_name or "").strip()
+        if not name:
+            name = self.doc_manager.next_lemma_name()
+        if not _IDENT_RE.match(name):
+            return {"ok": False, "phase": "prepare", "lemma_name": name, "error": f"Invalid lemma_name={name!r}."}
+        if name in self.pending_lemmas:
+            return {"ok": False, "phase": "prepare", "lemma_name": name, "error": "Lemma is already pending."}
+
         try:
             base_doc_id, sub_branch = self.doc_manager.create_lemma_subsession(
-                lemma_name=lemma_name,
+                lemma_name=name,
                 lemma_type=lemma_type,
                 doc_id=doc_id,
             )
         except Exception as exc:
-            return {"ok": False, "error": f"Lemma declaration/type-check failed: {exc}", "lemma_name": lemma_name}
+            return {"ok": False, "phase": "prepare", "lemma_name": name, "error": f"Lemma declaration/type-check failed: {exc}"}
+
+        self.pending_lemmas[name] = PendingLemma(
+            base_doc_id=base_doc_id,
+            lemma_name=name,
+            lemma_type=lemma_type,
+            sub_branch=sub_branch,
+        )
+        return {
+            "ok": True,
+            "phase": "prepare",
+            "lemma_name": name,
+            "base_doc_id": base_doc_id,
+            "sub_doc_id": sub_branch.doc_id,
+            "sub_states": sub_branch.list_states(),
+        }
+
+    def prove_intermediate_lemma(
+        self,
+        *,
+        lemma_name: str,
+        prompt: str | None = None,
+    ) -> dict[str, Any]:
+        pending = self.pending_lemmas.get(lemma_name)
+        if pending is None:
+            return {
+                "ok": False,
+                "phase": "prove",
+                "lemma_name": lemma_name,
+                "error": f"No pending lemma named `{lemma_name}`.",
+                "pending_lemmas": sorted(self.pending_lemmas.keys()),
+            }
 
         sub_prompt = prompt or (
             f"Prove the intermediate lemma `{lemma_name}`. "
             "Use run_tac/list_states/get_goals. Call abort if impossible."
         )
-        sub_result = self.run_lemma_subagent(sub_branch=sub_branch, prompt=sub_prompt)
+        sub_result = self.run_lemma_subagent(sub_branch=pending.sub_branch, prompt=sub_prompt)
         if not sub_result.get("ok"):
             return {
                 "ok": False,
+                "phase": "prove",
                 "lemma_name": lemma_name,
                 "error": sub_result.get("error", "Sub-agent failed."),
                 "aborted": bool(sub_result.get("aborted", False)),
+                "pending": True,
             }
 
         proof_script = str(sub_result.get("proof_script", "")).strip()
         try:
             reg = self.doc_manager.register_proved_lemma(
-                base_doc_id=base_doc_id,
-                lemma_name=lemma_name,
-                lemma_type=lemma_type,
+                base_doc_id=pending.base_doc_id,
+                lemma_name=pending.lemma_name,
+                lemma_type=pending.lemma_type,
                 proof_script=proof_script,
             )
         except Exception as exc:
-            return {"ok": False, "lemma_name": lemma_name, "error": f"Lemma registration failed: {exc}"}
+            return {
+                "ok": False,
+                "phase": "prove",
+                "lemma_name": lemma_name,
+                "error": f"Lemma registration failed: {exc}",
+                "pending": True,
+            }
 
+        self.pending_lemmas.pop(lemma_name, None)
+        reg["phase"] = "prove"
         reg["lemma_name"] = lemma_name
         reg["proof_script"] = proof_script
         return reg
+
+    def drop_pending_intermediate_lemma(self, *, lemma_name: str) -> dict[str, Any]:
+        removed = self.pending_lemmas.pop(lemma_name, None)
+        if removed is None:
+            return {
+                "ok": False,
+                "phase": "drop",
+                "lemma_name": lemma_name,
+                "error": f"No pending lemma named `{lemma_name}`.",
+                "pending_lemmas": sorted(self.pending_lemmas.keys()),
+            }
+        return {
+            "ok": True,
+            "phase": "drop",
+            "lemma_name": lemma_name,
+            "remaining_pending_lemmas": sorted(self.pending_lemmas.keys()),
+        }
+
+    def list_pending_intermediate_lemmas(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for name in sorted(self.pending_lemmas.keys()):
+            pending = self.pending_lemmas[name]
+            out.append(
+                {
+                    "lemma_name": name,
+                    "base_doc_id": pending.base_doc_id,
+                    "sub_doc_id": pending.sub_branch.doc_id,
+                    "sub_state_count": len(pending.sub_branch.nodes),
+                }
+            )
+        return out
 
 
 def build_docq_agent(model: Any = None, *, retries: int = 2) -> Agent[DocqAgentSession, str]:
@@ -358,17 +475,45 @@ def build_docq_agent(model: Any = None, *, retries: int = 2) -> Agent[DocqAgentS
             raise ModelRetry(str(exc)) from exc
 
     @agent.tool
-    def show_workspace(ctx: RunContext[DocqAgentSession]) -> dict[str, Any]:
-        return ctx.deps.doc_manager.show_workspace()
+    def list_docs(ctx: RunContext[DocqAgentSession]) -> list[dict[str, Any]]:
+        return ctx.deps.doc_manager.list_docs()
 
     @agent.tool
-    def list_states(ctx: RunContext[DocqAgentSession]) -> list[dict[str, Any]]:
-        return ctx.deps.doc_manager.list_states_verbose()
-
-    @agent.tool
-    def get_goals(ctx: RunContext[DocqAgentSession], state_index: int = 0) -> dict[str, Any]:
+    def checkout_doc(ctx: RunContext[DocqAgentSession], doc_id: int) -> dict[str, Any]:
         try:
-            return ctx.deps.doc_manager.get_goals(state_index=state_index)
+            return ctx.deps.doc_manager.checkout_doc(doc_id=doc_id)
+        except ValueError as exc:
+            raise ModelRetry(str(exc)) from exc
+
+    @agent.tool
+    def show_doc(ctx: RunContext[DocqAgentSession], doc_id: int) -> dict[str, Any]:
+        try:
+            return ctx.deps.doc_manager.show_doc(doc_id=doc_id)
+        except ValueError as exc:
+            raise ModelRetry(str(exc)) from exc
+
+    @agent.tool
+    def show_workspace(ctx: RunContext[DocqAgentSession], doc_id: int | None = None) -> dict[str, Any]:
+        try:
+            return ctx.deps.doc_manager.show_workspace(doc_id=doc_id)
+        except ValueError as exc:
+            raise ModelRetry(str(exc)) from exc
+
+    @agent.tool
+    def list_states(ctx: RunContext[DocqAgentSession], doc_id: int | None = None) -> list[dict[str, Any]]:
+        try:
+            return ctx.deps.doc_manager.list_states_verbose(doc_id=doc_id)
+        except ValueError as exc:
+            raise ModelRetry(str(exc)) from exc
+
+    @agent.tool
+    def get_goals(
+        ctx: RunContext[DocqAgentSession],
+        state_index: int = 0,
+        doc_id: int | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return ctx.deps.doc_manager.get_goals(state_index=state_index, doc_id=doc_id)
         except ValueError as exc:
             raise ModelRetry(str(exc)) from exc
 
@@ -377,9 +522,10 @@ def build_docq_agent(model: Any = None, *, retries: int = 2) -> Agent[DocqAgentS
         ctx: RunContext[DocqAgentSession],
         state_index: int = 0,
         tactic: str = "idtac.",
+        doc_id: int | None = None,
     ) -> dict[str, Any]:
         try:
-            return ctx.deps.doc_manager.run_tac(state_index=state_index, tactic=tactic)
+            return ctx.deps.doc_manager.run_tac(state_index=state_index, tactic=tactic, doc_id=doc_id)
         except ValueError as exc:
             raise ModelRetry(str(exc)) from exc
 
@@ -389,44 +535,92 @@ def build_docq_agent(model: Any = None, *, retries: int = 2) -> Agent[DocqAgentS
         line: int | None = None,
         before: int = 20,
         after: int = 20,
+        doc_id: int | None = None,
     ) -> dict[str, Any]:
         try:
-            return ctx.deps.doc_manager.read_source(line=line, before=before, after=after)
+            return ctx.deps.doc_manager.read_source(line=line, before=before, after=after, doc_id=doc_id)
         except ValueError as exc:
             raise ModelRetry(str(exc)) from exc
 
     @agent.tool
-    def add_import(ctx: RunContext[DocqAgentSession], libname: str, source: str) -> dict[str, Any]:
+    def add_import(
+        ctx: RunContext[DocqAgentSession],
+        libname: str,
+        source: str,
+        doc_id: int | None = None,
+    ) -> dict[str, Any]:
         try:
-            return ctx.deps.doc_manager.add_import(libname=libname, source=source)
+            return ctx.deps.doc_manager.add_import(libname=libname, source=source, doc_id=doc_id)
         except ValueError as exc:
             raise ModelRetry(str(exc)) from exc
 
     @agent.tool
-    def remove_import(ctx: RunContext[DocqAgentSession], libname: str, source: str) -> dict[str, Any]:
+    def remove_import(
+        ctx: RunContext[DocqAgentSession],
+        libname: str,
+        source: str,
+        doc_id: int | None = None,
+    ) -> dict[str, Any]:
         try:
-            return ctx.deps.doc_manager.remove_import(libname=libname, source=source)
+            return ctx.deps.doc_manager.remove_import(libname=libname, source=source, doc_id=doc_id)
         except ValueError as exc:
             raise ModelRetry(str(exc)) from exc
+
+    @agent.tool
+    def prepare_intermediate_lemma(
+        ctx: RunContext[DocqAgentSession],
+        lemma_type: str,
+        lemma_name: str | None = None,
+        doc_id: int | None = None,
+    ) -> dict[str, Any]:
+        return ctx.deps.prepare_intermediate_lemma(
+            lemma_type=lemma_type,
+            lemma_name=lemma_name,
+            doc_id=doc_id,
+        )
+
+    @agent.tool
+    def prove_intermediate_lemma(
+        ctx: RunContext[DocqAgentSession],
+        lemma_name: str,
+        prompt: str | None = None,
+    ) -> dict[str, Any]:
+        return ctx.deps.prove_intermediate_lemma(lemma_name=lemma_name, prompt=prompt)
+
+    @agent.tool
+    def drop_pending_intermediate_lemma(
+        ctx: RunContext[DocqAgentSession],
+        lemma_name: str,
+    ) -> dict[str, Any]:
+        return ctx.deps.drop_pending_intermediate_lemma(lemma_name=lemma_name)
+
+    @agent.tool
+    def list_pending_intermediate_lemmas(ctx: RunContext[DocqAgentSession]) -> list[dict[str, Any]]:
+        return ctx.deps.list_pending_intermediate_lemmas()
 
     @agent.tool
     def add_intermediate_lemma(
         ctx: RunContext[DocqAgentSession],
         lemma_type: str,
+        lemma_name: str | None = None,
         prompt: str | None = None,
+        doc_id: int | None = None,
     ) -> dict[str, Any]:
-        result = ctx.deps.add_intermediate_lemma(lemma_type=lemma_type, prompt=prompt)
-        if not result.get("ok", False):
-            raise ModelRetry(str(result.get("error", "Failed to add intermediate lemma.")))
-        return result
+        return ctx.deps.add_intermediate_lemma(
+            lemma_type=lemma_type,
+            lemma_name=lemma_name,
+            prompt=prompt,
+            doc_id=doc_id,
+        )
 
     @agent.tool
     def remove_intermediate_lemma(
         ctx: RunContext[DocqAgentSession],
         lemma_name: str,
+        doc_id: int | None = None,
     ) -> dict[str, Any]:
         try:
-            return ctx.deps.doc_manager.remove_intermediate_lemma(lemma_name=lemma_name)
+            return ctx.deps.doc_manager.remove_intermediate_lemma(lemma_name=lemma_name, doc_id=doc_id)
         except ValueError as exc:
             raise ModelRetry(str(exc)) from exc
 

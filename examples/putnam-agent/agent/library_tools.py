@@ -46,6 +46,11 @@ class TocExplorer:
         if not isinstance(root_id, str) or root_id not in self._nodes_by_id:
             root_id = "dir:ROOT"
         current = self._nodes_by_id[root_id]
+        root_entries = sorted(
+            str(self._nodes_by_id[cid].get("name"))
+            for cid in current.get("children_ids", [])
+            if cid in self._nodes_by_id
+        )
         consumed: list[str] = []
         for segment in path or []:
             children_ids = current.get("children_ids", [])
@@ -66,6 +71,7 @@ class TocExplorer:
                     "path": consumed,
                     "error": f"Unknown segment {segment!r}.",
                     "available": available,
+                    "root_entries": root_entries,
                 }
             current = matched
             consumed.append(segment)
@@ -100,6 +106,7 @@ class TocExplorer:
             "ok": True,
             "env": self.env,
             "path": consumed,
+            "root_entries": root_entries,
             "entries": entries,
         }
 

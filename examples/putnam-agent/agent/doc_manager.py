@@ -284,22 +284,16 @@ class DocumentManager:
             logger=self.logger,
         )
 
-    def _ensure_head_doc(self, doc_id: int | None) -> int:
-        if doc_id is None:
-            return self.head_doc_id
-        if doc_id != self.head_doc_id:
-            raise ValueError(
-                f"Stale document reference doc_id={doc_id}; current_head={self.head_doc_id}. "
-                f"No manual checkout in v1."
-            )
-        return doc_id
-
-    def _resolve_doc_for_mutation(self, doc_id: int | None) -> int:
+    def _resolve_existing_doc(self, doc_id: int | None) -> int:
         if doc_id is None:
             return self.head_doc_id
         if doc_id not in self.nodes:
-            raise ValueError(f"Unknown doc_id={doc_id}.")
+            known = sorted(self.nodes.keys())
+            raise ValueError(f"Unknown doc_id={doc_id}. available_doc_ids={known}")
         return doc_id
+
+    def _resolve_doc_for_mutation(self, doc_id: int | None) -> int:
+        return self._resolve_existing_doc(doc_id)
 
     def _create_mutation(self, *, base_doc_id: int, label: str, content: str) -> dict[str, Any]:
         branched = base_doc_id != self.head_doc_id
@@ -323,19 +317,19 @@ class DocumentManager:
         }
 
     def list_states(self, *, doc_id: int | None = None) -> list[int]:
-        resolved_doc_id = self._ensure_head_doc(doc_id)
+        resolved_doc_id = self._resolve_existing_doc(doc_id)
         return self.sessions[resolved_doc_id].available_state_indexes
 
     def list_states_verbose(self, *, doc_id: int | None = None) -> list[dict[str, Any]]:
-        resolved_doc_id = self._ensure_head_doc(doc_id)
+        resolved_doc_id = self._resolve_existing_doc(doc_id)
         return self.sessions[resolved_doc_id].list_states()
 
     def get_goals(self, *, state_index: int = 0, doc_id: int | None = None) -> dict[str, Any]:
-        resolved_doc_id = self._ensure_head_doc(doc_id)
+        resolved_doc_id = self._resolve_existing_doc(doc_id)
         return self.sessions[resolved_doc_id].get_goals(state_index=state_index)
 
     def run_tac(self, *, state_index: int, tactic: str, doc_id: int | None = None) -> dict[str, Any]:
-        resolved_doc_id = self._ensure_head_doc(doc_id)
+        resolved_doc_id = self._resolve_existing_doc(doc_id)
         session = self.sessions[resolved_doc_id]
         try:
             return session.run_tac(state_index=state_index, tactic=tactic)
@@ -353,7 +347,7 @@ class DocumentManager:
         after: int = 20,
         doc_id: int | None = None,
     ) -> dict[str, Any]:
-        resolved_doc_id = self._ensure_head_doc(doc_id)
+        resolved_doc_id = self._resolve_existing_doc(doc_id)
         content = self.nodes[resolved_doc_id].content
         lines = content.splitlines()
         if line is None:
@@ -380,7 +374,7 @@ class DocumentManager:
         }
 
     def show_workspace(self, *, doc_id: int | None = None) -> dict[str, Any]:
-        resolved_doc_id = self._ensure_head_doc(doc_id)
+        resolved_doc_id = self._resolve_existing_doc(doc_id)
         node = self.nodes[resolved_doc_id]
         session = self.sessions[resolved_doc_id]
         return {
@@ -388,9 +382,46 @@ class DocumentManager:
             "head_doc_id": self.head_doc_id,
             "parent_doc_id": node.parent_doc_id,
             "label": node.label,
+            "source_path": str(session.source_path),
             "states": session.list_states(),
             "content": _format_with_line_numbers(node.content),
         }
+
+    def list_docs(self) -> list[dict[str, Any]]:
+        children: dict[int, list[int]] = {doc_id: [] for doc_id in self.nodes}
+        for doc_id, node in self.nodes.items():
+            if node.parent_doc_id is not None and node.parent_doc_id in children:
+                children[node.parent_doc_id].append(doc_id)
+
+        out: list[dict[str, Any]] = []
+        for doc_id in sorted(self.nodes.keys()):
+            node = self.nodes[doc_id]
+            session = self.sessions.get(doc_id)
+            out.append(
+                {
+                    "doc_id": doc_id,
+                    "parent_doc_id": node.parent_doc_id,
+                    "label": node.label,
+                    "is_head": doc_id == self.head_doc_id,
+                    "children_doc_ids": sorted(children.get(doc_id, [])),
+                    "state_count": len(session.nodes) if session is not None else 0,
+                }
+            )
+        return out
+
+    def checkout_doc(self, *, doc_id: int) -> dict[str, Any]:
+        resolved = self._resolve_existing_doc(doc_id)
+        previous = self.head_doc_id
+        self.head_doc_id = resolved
+        self._log(f"checkout doc: {previous} -> {resolved}")
+        return {
+            "ok": True,
+            "previous_head_doc_id": previous,
+            "head_doc_id": self.head_doc_id,
+        }
+
+    def show_doc(self, *, doc_id: int) -> dict[str, Any]:
+        return self.show_workspace(doc_id=doc_id)
 
     def _insert_block_before_target(self, base_content: str, block: str) -> str:
         layout = parse_last_target_layout(base_content)
