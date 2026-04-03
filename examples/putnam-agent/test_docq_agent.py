@@ -158,6 +158,21 @@ def test_document_manager_auto_branch_on_mutation_from_older_doc(tmp_path: Path)
     assert manager.head_doc_id == 2
 
 
+def test_document_manager_remove_import(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    added = manager.add_import(libname="MathComp", source="ssreflect")
+    assert added["ok"] is True
+
+    removed = manager.remove_import(libname="MathComp", source="ssreflect")
+    assert removed["ok"] is True
+    workspace = manager.show_workspace()
+    assert "From MathComp Require Import ssreflect." not in workspace["content"]
+
+    with pytest.raises(ValueError, match="Import not found"):
+        manager.remove_import(libname="MathComp", source="ssreflect")
+
+
 def test_docq_add_intermediate_lemma_success_and_abort(tmp_path: Path):
     client = FakeClient()
     session = DocqAgentSession.from_source(
@@ -190,6 +205,29 @@ def test_docq_add_intermediate_lemma_success_and_abort(tmp_path: Path):
     assert failed["ok"] is False
     assert failed["aborted"] is True
     assert session_abort.doc_manager.head_doc_id == 0
+
+
+def test_document_manager_remove_intermediate_lemma(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=10,
+    )
+    session.run_lemma_subagent = lambda **kwargs: {"ok": True, "proof_script": "exact I."}  # type: ignore[method-assign]
+    added = session.add_intermediate_lemma(lemma_type="True")
+    assert added["ok"] is True
+    lemma_name = added["lemma_name"]
+
+    removed = session.doc_manager.remove_intermediate_lemma(lemma_name=lemma_name)
+    assert removed["ok"] is True
+    workspace = session.doc_manager.show_workspace()
+    assert lemma_name not in workspace["content"]
+
+    with pytest.raises(ValueError, match="not found"):
+        session.doc_manager.remove_intermediate_lemma(lemma_name=lemma_name)
 
 
 def test_docq_shared_budget_blocks_subagent(tmp_path: Path):

@@ -20,7 +20,9 @@ DOCQ_SYSTEM_PROMPT = (
     "- Use `show_workspace` to inspect the current virtual manipulated file.\n"
     "- Use `run_tac` from any known state index.\n"
     "- For imports, only call `add_import(libname, source)`.\n"
+    "- If an import is problematic, call `remove_import(libname, source)`.\n"
     "- For helper statements, call `add_intermediate_lemma(lemma_type)`.\n"
+    "- If a helper lemma is problematic, call `remove_intermediate_lemma(lemma_name)`.\n"
     "- If stuck on lemma proving, the sub-agent can abort and report why."
 )
 
@@ -324,6 +326,13 @@ def build_docq_agent(model: Any = None, *, retries: int = 2) -> Agent[DocqAgentS
             raise ModelRetry(str(exc)) from exc
 
     @agent.tool
+    def remove_import(ctx: RunContext[DocqAgentSession], libname: str, source: str) -> dict[str, Any]:
+        try:
+            return ctx.deps.doc_manager.remove_import(libname=libname, source=source)
+        except ValueError as exc:
+            raise ModelRetry(str(exc)) from exc
+
+    @agent.tool
     def add_intermediate_lemma(
         ctx: RunContext[DocqAgentSession],
         lemma_type: str,
@@ -333,5 +342,15 @@ def build_docq_agent(model: Any = None, *, retries: int = 2) -> Agent[DocqAgentS
         if not result.get("ok", False):
             raise ModelRetry(str(result.get("error", "Failed to add intermediate lemma.")))
         return result
+
+    @agent.tool
+    def remove_intermediate_lemma(
+        ctx: RunContext[DocqAgentSession],
+        lemma_name: str,
+    ) -> dict[str, Any]:
+        try:
+            return ctx.deps.doc_manager.remove_intermediate_lemma(lemma_name=lemma_name)
+        except ValueError as exc:
+            raise ModelRetry(str(exc)) from exc
 
     return agent

@@ -47,6 +47,17 @@ def _extract_proof_body(proof_script: str) -> str:
     return text
 
 
+def _remove_blank_padding(lines: list[str]) -> list[str]:
+    out = list(lines)
+    i = 0
+    while i < len(out) - 1:
+        if out[i].strip() == "" and out[i + 1].strip() == "":
+            del out[i]
+            continue
+        i += 1
+    return out
+
+
 @dataclass(frozen=True)
 class ParsedDocumentLayout:
     lines: list[str]
@@ -399,6 +410,36 @@ class DocumentManager:
                 last_import = idx
         return 0 if last_import < 0 else last_import + 1
 
+    @staticmethod
+    def _import_remove_index(prefix_lines: list[str], *, libname: str, source: str) -> int:
+        pattern = re.compile(
+            rf"^\s*From\s+{re.escape(libname)}\s+Require\s+Import\s+{re.escape(source)}\s*\.\s*$"
+        )
+        for idx in range(len(prefix_lines) - 1, -1, -1):
+            if pattern.match(prefix_lines[idx]):
+                return idx
+        return -1
+
+    @staticmethod
+    def _find_lemma_range(prefix_lines: list[str], *, lemma_name: str) -> tuple[int, int] | None:
+        start_re = re.compile(rf"^\s*Lemma\s+{re.escape(lemma_name)}\s*:")
+        start_idx = -1
+        for idx in range(len(prefix_lines) - 1, -1, -1):
+            if start_re.search(prefix_lines[idx]):
+                start_idx = idx
+                break
+        if start_idx < 0:
+            return None
+
+        end_idx = -1
+        for idx in range(start_idx + 1, len(prefix_lines)):
+            if any(token in prefix_lines[idx] for token in END_PROOF_TOKENS):
+                end_idx = idx
+                break
+        if end_idx < 0:
+            return None
+        return (start_idx, end_idx)
+
     def add_import(self, *, libname: str, source: str, doc_id: int | None = None) -> dict[str, Any]:
         if not IDENT_RE.match(libname):
             raise ValueError(f"Invalid libname={libname!r}.")
@@ -421,6 +462,31 @@ class DocumentManager:
             content=new_content,
         )
         result["statement"] = statement
+        return result
+
+    def remove_import(self, *, libname: str, source: str, doc_id: int | None = None) -> dict[str, Any]:
+        if not IDENT_RE.match(libname):
+            raise ValueError(f"Invalid libname={libname!r}.")
+        if not IDENT_RE.match(source):
+            raise ValueError(f"Invalid source={source!r}.")
+
+        resolved_doc_id = self._resolve_doc_for_mutation(doc_id)
+        base = self.nodes[resolved_doc_id].content
+        layout = parse_last_target_layout(base)
+        prefix = list(layout.prefix_lines)
+        idx = self._import_remove_index(prefix, libname=libname, source=source)
+        if idx < 0:
+            raise ValueError(f"Import not found: From {libname} Require Import {source}.")
+
+        removed = prefix.pop(idx).strip()
+        prefix = _remove_blank_padding(prefix)
+        new_content = _join_lines(prefix + layout.target_lines + layout.suffix_lines, trailing_newline=True)
+        result = self._create_mutation(
+            base_doc_id=resolved_doc_id,
+            label=f"remove_import:{libname}.{source}",
+            content=new_content,
+        )
+        result["removed_statement"] = removed
         return result
 
     def next_lemma_name(self) -> str:
@@ -486,4 +552,29 @@ class DocumentManager:
             content=content,
         )
         result["lemma_name"] = lemma_name
+        return result
+
+    def remove_intermediate_lemma(self, *, lemma_name: str, doc_id: int | None = None) -> dict[str, Any]:
+        if not IDENT_RE.match(lemma_name):
+            raise ValueError(f"Invalid lemma_name={lemma_name!r}.")
+
+        resolved_doc_id = self._resolve_doc_for_mutation(doc_id)
+        base = self.nodes[resolved_doc_id].content
+        layout = parse_last_target_layout(base)
+        prefix = list(layout.prefix_lines)
+        span = self._find_lemma_range(prefix, lemma_name=lemma_name)
+        if span is None:
+            raise ValueError(f"Intermediate lemma `{lemma_name}` not found.")
+        start, end = span
+        removed_lines = prefix[start : end + 1]
+        del prefix[start : end + 1]
+        prefix = _remove_blank_padding(prefix)
+        new_content = _join_lines(prefix + layout.target_lines + layout.suffix_lines, trailing_newline=True)
+        result = self._create_mutation(
+            base_doc_id=resolved_doc_id,
+            label=f"remove_lemma:{lemma_name}",
+            content=new_content,
+        )
+        result["lemma_name"] = lemma_name
+        result["removed_block"] = _join_lines(removed_lines, trailing_newline=False)
         return result

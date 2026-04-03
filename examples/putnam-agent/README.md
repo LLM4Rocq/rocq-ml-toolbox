@@ -147,6 +147,10 @@ Notes:
 ## DocQ Agent Quickstart
 
 This second agent workflow focuses on library/docstring exploration plus intermediate-lemma insertion on a virtual document DAG.
+It supports both forward and inverse edits on the virtual workspace:
+
+- `add_import` / `remove_import`
+- `add_intermediate_lemma` / `remove_intermediate_lemma`
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... \
