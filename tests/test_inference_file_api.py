@@ -56,6 +56,7 @@ def test_access_libraries_prefers_precomputed_env_toc(tmp_path: Path):
                 "parent_id": "dir:ROOT",
                 "children_ids": [],
                 "one_liner": "",
+                "line_count": None,
             },
         ],
         "file_index": {"abc": "file:theories/Demo.v"},

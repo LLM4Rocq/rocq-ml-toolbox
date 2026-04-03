@@ -141,7 +141,7 @@ def _enrich_file_nodes_with_line_count(payload: dict[str, Any], coq_lib_path: Pa
             enriched.append(raw_node)
             continue
         node = dict(raw_node)
-        if node.get("type") == "file" and "line_count" not in node:
+        if node.get("type") == "file" and (("line_count" not in node) or (node.get("line_count") is None)):
             node_path = node.get("path")
             if isinstance(node_path, str):
                 for candidate in _file_candidates_from_node_path(coq_lib_path, node_path):
