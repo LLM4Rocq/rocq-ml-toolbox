@@ -162,6 +162,11 @@ It also exposes explicit branch/DAG controls:
   - `drop_pending_intermediate_lemma`
   - `list_pending_intermediate_lemmas`
 
+TOC note:
+
+- Some env-level TOCs expose logical module paths without `.v` suffix (for example `mathcomp/boot/ssrbool`).
+- `read_source_file` now resolves both logical paths and `.v` paths automatically.
+
 ```bash
 OPENROUTER_API_KEY=sk-or-... \
 DOCQ_SEARCH_BASE_URL=http://127.0.0.1:9000 \
