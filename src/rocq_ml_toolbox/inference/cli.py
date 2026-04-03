@@ -169,6 +169,17 @@ def main(argv: Optional[List[str]] = None) -> None:
         default=int(os.environ.get("SESSION_CLEANUP_INTERVAL_SECONDS", "60")),
         help="How often to scan and evict expired sessions.",
     )
+    p.add_argument(
+        "--fs-access-mode",
+        choices=["read_lib_only", "rw_anywhere"],
+        default=os.environ.get("FS_ACCESS_MODE", "read_lib_only"),
+        help="Filesystem access policy for read_file/write_file endpoints (immutable at startup).",
+    )
+    p.add_argument(
+        "--coq-lib-path",
+        default=os.environ.get("COQ_LIB_PATH"),
+        help="Optional override for Coq lib root (defaults to `coqc -where`).",
+    )
     p.add_argument("--app", default=DEFAULT_APP)
     p.add_argument("--config", default=DEFAULT_CONFIG)
 
@@ -198,6 +209,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     env["SESSION_TTL_SECONDS"] = str(max(0, int(args.session_ttl_seconds)))
     env["SESSION_CACHE_KEEP_FEEDBACK"] = "1" if args.session_cache_keep_feedback else "0"
     env["SESSION_CLEANUP_INTERVAL_SECONDS"] = str(max(1, int(args.session_cleanup_interval_seconds)))
+    env["FS_ACCESS_MODE"] = str(args.fs_access_mode)
+    if args.coq_lib_path:
+        env["COQ_LIB_PATH"] = str(args.coq_lib_path)
     
     first_pet_port = args.pet_server_start_port
     all_required_ports = list(range(first_pet_port, first_pet_port+ args.num_pet_server))

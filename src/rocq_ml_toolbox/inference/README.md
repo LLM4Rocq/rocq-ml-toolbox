@@ -50,7 +50,11 @@ print(report["summary"])
 - `POST /get_dump`: stream AST/proof/diagnostic dump for a `.v` file.
 - `POST /get_glob`: load/compile and return `.glob` data.
 - `POST /safeverify`: run SafeVerify in the server environment.
-- `GET /empty_file`: allocate an empty temporary `.v` file path.
+- `POST /tmp_file`: allocate a temporary `.v` file path.
+- `POST /access_libraries`: load `<coq_lib>/<env>.toc.json` or fallback-scan `theories` + `user-contrib`.
+- `POST /read_file`: chunked UTF-8 file reads (`offset`, `max_chars`).
+- `POST /write_file`: chunked writes (`offset`, `truncate`) with startup fs policy enforcement.
+- `POST /read_docstrings`: load docstring entries from `<source>.toc.json`.
 
 Most proof interaction calls (`run`, `goals`, `start`, `state_hash`, etc.) go through `/rpc` and the `pytanque` route registry.
 
@@ -62,3 +66,5 @@ Most proof interaction calls (`run`, `goals`, `start`, `state_hash`, etc.) go th
 - `--session-cleanup-interval-seconds`: eviction scan interval.
 - `--session-cache-keep-feedback`: keep `State.feedback` in cache (off by default).
 - `--pet-server-cmd`: override `pet-server` executable path.
+- `--fs-access-mode`: immutable file policy for read/write endpoints (`read_lib_only` or `rw_anywhere`).
+- `--coq-lib-path`: optional override for Coq lib root (otherwise resolved from `coqc -where`).
