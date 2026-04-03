@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -9,11 +10,12 @@ import pytest
 from pytanque.protocol import Goal, State
 
 pytest.importorskip("pydantic_ai")
+from pydantic_ai.models.test import TestModel
 
 THIS_DIR = Path(__file__).resolve().parent
 
 from agent.doc_manager import DocumentManager  # noqa: E402
-from agent.docq_agent import DocqAgentSession  # noqa: E402
+from agent.docq_agent import DocqAgentSession, LemmaSubSession, build_docq_subagent  # noqa: E402
 from agent.library_tools import TocExplorer, read_source_via_client  # noqa: E402
 
 
@@ -243,6 +245,62 @@ def test_docq_shared_budget_blocks_subagent(tmp_path: Path):
     out = session.add_intermediate_lemma(lemma_type="True")
     assert out["ok"] is False
     assert "budget" in out["error"].lower()
+
+
+def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+
+    class FakeSemantic:
+        def search(self, query: str, k: int = 5) -> list[dict[str, Any]]:
+            return [{"logical_path": "Demo.target", "docstring": query, "k": k}]
+
+    session.semantic_search = FakeSemantic()
+    branch = session.doc_manager.sessions[session.doc_manager.head_doc_id]
+    deps = LemmaSubSession(
+        branch=branch,
+        client=session.client,
+        toc_explorer=session.toc_explorer,
+        semantic_search=session.semantic_search,
+    )
+    agent = build_docq_subagent(
+        model=TestModel(
+            call_tools=[
+                "explore_toc",
+                "semantic_doc_search",
+                "read_source_file",
+                "show_workspace",
+                "read_workspace_source",
+                "list_states",
+                "get_goals",
+                "run_tac",
+                "abort",
+            ]
+        )
+    )
+    result = agent.run_sync("Use all tools.", deps=deps)
+    payload = json.loads(result.output)
+
+    assert "explore_toc" in payload
+    assert payload["explore_toc"]["ok"] is True
+    assert "semantic_doc_search" in payload
+    assert payload["semantic_doc_search"]["results"][0]["logical_path"] == "Demo.target"
+    assert "read_source_file" in payload
+    assert "Theorem target" in payload["read_source_file"]["content"]
+    assert "show_workspace" in payload
+    assert "states" in payload["show_workspace"]
+    assert "read_workspace_source" in payload
+    assert payload["read_workspace_source"]["doc_id"] == branch.doc_id
+    assert "list_states" in payload
+    assert "get_goals" in payload
+    assert "run_tac" in payload
+    assert "abort" in payload
 
 
 def test_toc_explorer_and_read_source_trim(tmp_path: Path):

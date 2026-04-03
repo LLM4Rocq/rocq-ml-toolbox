@@ -29,6 +29,8 @@ DOCQ_SYSTEM_PROMPT = (
 LEMMA_SUBAGENT_SYSTEM_PROMPT = (
     "You are proving one intermediate lemma.\n"
     "Use tools:\n"
+    "- `explore_toc`, `semantic_doc_search`, `read_source_file`\n"
+    "- `show_workspace`, `read_workspace_source`\n"
     "- `list_states`, `get_goals`, `run_tac`\n"
     "- `abort(explanation)` if the lemma is likely wrong/unprovable.\n"
     "Goal: finish with no remaining goals."
@@ -38,6 +40,9 @@ LEMMA_SUBAGENT_SYSTEM_PROMPT = (
 @dataclass
 class LemmaSubSession:
     branch: BranchSession
+    client: Any
+    toc_explorer: TocExplorer
+    semantic_search: SemanticDocSearchClient | None = None
     abort_reason: str | None = None
 
 
@@ -54,6 +59,73 @@ def build_docq_subagent(model: Any = None, *, retries: int = 1) -> Agent[LemmaSu
     @agent.tool
     def list_states(ctx: RunContext[LemmaSubSession]) -> list[int]:
         return ctx.deps.branch.available_state_indexes
+
+    @agent.tool
+    def explore_toc(ctx: RunContext[LemmaSubSession], path: list[str] | None = None) -> dict[str, Any]:
+        return ctx.deps.toc_explorer.explore(path or [])
+
+    @agent.tool
+    def semantic_doc_search(
+        ctx: RunContext[LemmaSubSession],
+        query: str,
+        k: int = 5,
+    ) -> dict[str, Any]:
+        if ctx.deps.semantic_search is None:
+            raise ModelRetry("Semantic search is not configured for this session.")
+        if k < 1:
+            raise ModelRetry("k must be >= 1")
+        results = ctx.deps.semantic_search.search(query=query, k=k)
+        return {"query": query, "k": k, "results": results}
+
+    @agent.tool
+    def read_source_file(
+        ctx: RunContext[LemmaSubSession],
+        path: str | None = None,
+        line: int | None = None,
+        before: int = 20,
+        after: int = 20,
+    ) -> dict[str, Any]:
+        try:
+            return read_source_via_client(
+                ctx.deps.client,
+                path or str(ctx.deps.branch.source_path),
+                line=line,
+                before=before,
+                after=after,
+            )
+        except Exception as exc:
+            raise ModelRetry(str(exc)) from exc
+
+    @agent.tool
+    def show_workspace(ctx: RunContext[LemmaSubSession]) -> dict[str, Any]:
+        content = read_source_via_client(ctx.deps.client, str(ctx.deps.branch.source_path))
+        return {
+            "doc_id": ctx.deps.branch.doc_id,
+            "source_path": str(ctx.deps.branch.source_path),
+            "states": ctx.deps.branch.list_states(),
+            "content": content.get("content", ""),
+        }
+
+    @agent.tool
+    def read_workspace_source(
+        ctx: RunContext[LemmaSubSession],
+        line: int | None = None,
+        before: int = 20,
+        after: int = 20,
+    ) -> dict[str, Any]:
+        try:
+            payload = read_source_via_client(
+                ctx.deps.client,
+                str(ctx.deps.branch.source_path),
+                line=line,
+                before=before,
+                after=after,
+            )
+            payload["doc_id"] = ctx.deps.branch.doc_id
+            payload["source_path"] = str(ctx.deps.branch.source_path)
+            return payload
+        except Exception as exc:
+            raise ModelRetry(str(exc)) from exc
 
     @agent.tool
     def get_goals(ctx: RunContext[LemmaSubSession], state_index: int = 0) -> dict[str, Any]:
@@ -161,7 +233,12 @@ class DocqAgentSession:
         if remaining is not None and remaining <= 0:
             return {"ok": False, "error": "Tool-call budget exhausted before sub-agent run."}
 
-        deps = LemmaSubSession(branch=sub_branch)
+        deps = LemmaSubSession(
+            branch=sub_branch,
+            client=self.client,
+            toc_explorer=self.toc_explorer,
+            semantic_search=self.semantic_search,
+        )
         subagent = build_docq_subagent(model=self.subagent_model, retries=self.subagent_retries)
         limits = None
         if remaining is not None:
