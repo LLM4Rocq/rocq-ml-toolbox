@@ -68,7 +68,7 @@ class RocqParser:
         return dependencies
 
     def _extract_loadpath(self, timeout: int=30) -> Dict[str, str]:
-        path = self.client.empty_file()
+        path = self.client.tmp_file()
         state = self.client.get_root_state(path)
         result = self.client.run(state, 'Print LoadPath.', timeout=timeout)
         return parse_loadpath(result.feedback[0][1])

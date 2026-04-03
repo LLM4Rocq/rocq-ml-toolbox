@@ -74,7 +74,7 @@ class OpamDocker(BaseDocker):
             self.exec_cmd([
                 "bash",
                 "-lc",
-                "cd ~/rocq-ml-toolbox && git pull"
+                "cd ~/rocq-ml-toolbox && git pull && git switch v0.1.1"
             ])
 
 
