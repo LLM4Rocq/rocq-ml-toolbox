@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -20,6 +21,7 @@ DOCQ_SYSTEM_PROMPT = (
     "- Use `read_source_file` to inspect library files with optional line window.\n"
     "- For library reads, pass TOC-relative file paths exactly as returned by `explore_toc`.\n"
     "- Use `show_workspace` or `show_doc(doc_id)` to inspect virtual files.\n"
+    "- Use `completion_status(doc_id?)` before finishing; do not end while `latest_goals_count > 0`.\n"
     "- Use `list_docs` and `checkout_doc` to navigate document branches.\n"
     "- Use `run_tac` from any known state index (optionally scoped by `doc_id`).\n"
     "- Use ASCII Coq syntax in tool arguments: `forall`, `exists`, `->`, `/\\`, `\\/`, `<=`, `>=`.\n"
@@ -87,6 +89,31 @@ class PendingLemma:
     lemma_name: str
     lemma_type: str
     sub_branch: BranchSession
+
+
+class _LockedClientProxy:
+    """Serialize all client method calls to avoid concurrent JSON-RPC id races."""
+
+    def __init__(self, inner_client: Any, *, lock: threading.RLock | None = None):
+        object.__setattr__(self, "_inner_client", inner_client)
+        object.__setattr__(self, "_lock", lock or threading.RLock())
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._inner_client, name)
+        if not callable(attr):
+            return attr
+
+        def _wrapped(*args: Any, **kwargs: Any) -> Any:
+            with self._lock:
+                return attr(*args, **kwargs)
+
+        return _wrapped
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in {"_inner_client", "_lock"}:
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._inner_client, name, value)
 
 
 _IDENT_RE = re.compile(r"^[A-Za-z0-9_.]+$")
@@ -188,6 +215,38 @@ def _adopt_branch_state(dst: BranchSession, src: BranchSession) -> None:
     dst.source_content = src.source_content
     dst.layout = src.layout
     dst.nodes = src.nodes
+
+
+def _rebuild_branch_on_client(branch: BranchSession, *, client: Any) -> BranchSession:
+    """Clone a branch onto another client by replaying its tactic path."""
+    tmp_path = Path(client.tmp_file(content=branch.source_content)).resolve()
+    layout = parse_last_target_layout(branch.source_content)
+    state0 = client.get_state_at_pos(
+        str(tmp_path),
+        layout.proof_line,
+        layout.proof_character,
+        timeout=branch.timeout,
+    )
+    rebuilt = BranchSession(
+        client=client,
+        doc_id=branch.doc_id,
+        source_path=tmp_path,
+        source_content=branch.source_content,
+        layout=layout,
+        timeout=branch.timeout,
+        nodes=[StateNode(index=0, parent_index=None, tactic=None, state=state0)],
+        logger=branch.logger,
+    )
+    state_index = 0
+    for tactic in _branch_tactics_path(branch):
+        out = rebuilt.run_tac(state_index, tactic)
+        if not out.get("ok", False):
+            raise ValueError(
+                "Failed to replay tactic while cloning subagent workspace: "
+                f"{out.get('error', 'unknown error')}"
+            )
+        state_index = int(out["new_state_index"])
+    return rebuilt
 
 
 def _render_content_window(
@@ -460,11 +519,12 @@ class DocqAgentSession:
         subagent_retries: int = 1,
         include_semantic_tool: bool = True,
     ) -> "DocqAgentSession":
+        locked_client = _LockedClientProxy(client)
         if connect:
-            client.connect()
+            locked_client.connect()
         source = Path(source_path).resolve()
-        manager = DocumentManager(client, source, timeout=timeout, logger=logger)
-        explorer = TocExplorer(client, env=env)
+        manager = DocumentManager(locked_client, source, timeout=timeout, logger=logger)
+        explorer = TocExplorer(locked_client, env=env)
         semantic_client = None
         if semantic_base_url:
             semantic_client = SemanticDocSearchClient(
@@ -474,7 +534,7 @@ class DocqAgentSession:
                 timeout=timeout,
             )
         session = cls(
-            client=client,
+            client=locked_client,
             source_path=source,
             env=env,
             doc_manager=manager,
@@ -496,17 +556,18 @@ class DocqAgentSession:
             self.logger(message)
 
     def _try_make_fresh_client(self) -> Any | None:
-        host = getattr(self.client, "host", None)
-        port = getattr(self.client, "port", None)
+        base_client = getattr(self.client, "_inner_client", self.client)
+        host = getattr(base_client, "host", None)
+        port = getattr(base_client, "port", None)
         if host is None or port is None:
             return None
         try:
-            fresh = type(self.client)(host, port)
+            fresh = type(base_client)(host, port)
         except Exception:
             return None
-        if hasattr(self.client, "timeout_http") and hasattr(fresh, "timeout_http"):
+        if hasattr(base_client, "timeout_http") and hasattr(fresh, "timeout_http"):
             try:
-                fresh.timeout_http = self.client.timeout_http
+                fresh.timeout_http = base_client.timeout_http
             except Exception:
                 pass
         connect = getattr(fresh, "connect", None)
@@ -610,10 +671,21 @@ class DocqAgentSession:
             f"{remaining_tool_calls if remaining_tool_calls is not None else 'unbounded'}, "
             f"remaining_requests={remaining_requests if remaining_requests is not None else 'unbounded'})"
         )
+        sub_client = self._try_make_fresh_client()
+        owns_sub_client = sub_client is not None
+        if sub_client is None:
+            # Fallback: keep existing session client (still protected by lock proxy).
+            sub_client = self.client
+        try:
+            isolated_branch = _rebuild_branch_on_client(sub_branch, client=sub_client)
+        except Exception as exc:
+            if owns_sub_client:
+                self._close_client_quietly(sub_client)
+            return {"ok": False, "error": f"Failed to initialize isolated subagent workspace: {exc}"}
 
         deps = LemmaSubSession(
-            branch=sub_branch,
-            client=self.client,
+            branch=isolated_branch,
+            client=sub_client,
             toc_explorer=self.toc_explorer,
             semantic_search=self.semantic_search,
             logger=self.logger,
@@ -640,6 +712,9 @@ class DocqAgentSession:
         except Exception as exc:
             self._log(f"subagent failure(doc_id={sub_branch.doc_id}): {exc}")
             return {"ok": False, "error": f"Sub-agent failure: {exc}"}
+        finally:
+            if owns_sub_client:
+                self._close_client_quietly(sub_client)
 
         if deps.abort_reason:
             self._log(f"subagent abort(doc_id={sub_branch.doc_id}): {deps.abort_reason}")
@@ -858,6 +933,9 @@ class DocqAgentSession:
             )
         return out
 
+    def completion_status(self, *, doc_id: int | None = None) -> dict[str, Any]:
+        return self.doc_manager.completion_status(doc_id=doc_id)
+
 
 def build_docq_agent(
     model: Any = None,
@@ -966,6 +1044,13 @@ def build_docq_agent(
     def show_workspace(ctx: RunContext[DocqAgentSession], doc_id: int | None = None) -> dict[str, Any]:
         try:
             return ctx.deps.doc_manager.show_workspace(doc_id=doc_id)
+        except ValueError as exc:
+            raise ModelRetry(str(exc)) from exc
+
+    @agent.tool
+    def completion_status(ctx: RunContext[DocqAgentSession], doc_id: int | None = None) -> dict[str, Any]:
+        try:
+            return ctx.deps.completion_status(doc_id=doc_id)
         except ValueError as exc:
             raise ModelRetry(str(exc)) from exc
 
@@ -1112,18 +1197,34 @@ def build_docq_agent(
 
     @agent.output_validator
     def ensure_no_pending_lemmas(ctx: RunContext[DocqAgentSession], output: str) -> str:
+        text = output.strip()
+        # TestModel tool-trace outputs are JSON blobs; allow those so deterministic tests
+        # can inspect tool payloads without forcing another model round-trip.
+        if text.startswith("{") and text.endswith("}"):
+            return output
         pending = ctx.deps.list_pending_intermediate_lemmas()
         if pending:
-            text = output.strip()
-            # TestModel tool-trace outputs are JSON blobs; allow those so deterministic tests
-            # can inspect tool payloads without forcing another model round-trip.
-            if text.startswith("{") and text.endswith("}"):
-                return output
             names = ", ".join(item.get("lemma_name", "?") for item in pending)
             raise ModelRetry(
                 "You cannot finish while intermediate lemmas are pending. "
                 f"Pending: {names}. "
                 "Call `prove_intermediate_lemma` or `drop_pending_intermediate_lemma`."
+            )
+        try:
+            status = ctx.deps.completion_status()
+        except Exception as exc:
+            raise ModelRetry(
+                "Could not read completion status from the proof workspace. "
+                f"Tool/backend error: {exc}. "
+                "Call `show_workspace` and `get_goals` on the active doc/state, then continue proving."
+            ) from exc
+        if not bool(status.get("latest_proof_finished", False)):
+            raise ModelRetry(
+                "You cannot finish yet: the current head proof is still open. "
+                f"doc_id={status.get('doc_id')} latest_state_index={status.get('latest_state_index')} "
+                f"latest_goals_count={status.get('latest_goals_count')}. "
+                "Call `completion_status` then `get_goals` on the latest state and continue with `run_tac`. "
+                "If needed, inspect/branch with `list_states`, `show_workspace`, `list_docs`, `checkout_doc`."
             )
         return output
 

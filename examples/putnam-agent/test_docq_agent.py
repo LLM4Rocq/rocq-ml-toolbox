@@ -307,6 +307,14 @@ def test_run_tac_rejects_markdown_wrapped_tactic(tmp_path: Path):
     assert "markdown-wrapped tactic" in out["error"]
 
 
+def test_run_tac_rejects_placeholder_tactic(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    out = manager.run_tac(state_index=0, tactic="all: admit.")
+    assert out["ok"] is False
+    assert "placeholder tactic" in out["error"]
+
+
 def test_run_tac_missing_reference_includes_hint(tmp_path: Path):
     client = FakeMissingRefClient()
     manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
@@ -577,6 +585,41 @@ def test_docq_shared_budget_blocks_subagent(tmp_path: Path):
     assert "budget" in out["error"].lower()
 
 
+def test_docq_completion_status_reports_open_and_closed_states(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    open_status = session.completion_status()
+    assert open_status["latest_proof_finished"] is False
+    assert open_status["latest_goals_count"] == 1
+    assert open_status["solved_state_indexes"] == []
+
+    session.doc_manager.run_tac(state_index=0, tactic="idtac.")
+    session.doc_manager.run_tac(state_index=1, tactic="idtac.")
+    closed_status = session.completion_status()
+    assert closed_status["latest_proof_finished"] is True
+    assert closed_status["latest_goals_count"] == 0
+    assert closed_status["latest_has_placeholder_tactic"] is False
+    assert closed_status["solved_state_indexes"] == [2]
+
+
+def test_document_manager_materialized_source_uses_current_proof_trace(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    manager.run_tac(state_index=0, tactic="idtac.")
+    manager.run_tac(state_index=1, tactic="idtac.")
+    materialized = manager.materialized_source()
+    assert "Proof." in materialized
+    assert "Qed." in materialized
+    assert "Admitted." not in materialized
+    assert materialized.count("idtac.") == 2
+
+
 def test_docq_request_budget_blocks_subagent(tmp_path: Path):
     client = FakeClient()
     session = DocqAgentSession.from_source(
@@ -604,6 +647,23 @@ def test_docq_session_accepts_configured_request_limit(tmp_path: Path):
         max_requests=321,
     )
     assert session.usage_limits.request_limit == 321
+
+
+def test_docq_output_validator_blocks_when_head_proof_not_finished(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    agent = build_docq_agent(
+        model=TestModel(call_tools=[], custom_output_text="I am done."),
+        retries=1,
+    )
+    with pytest.raises(Exception, match="output validation"):
+        agent.run_sync("Stop now.", deps=session)
 
 
 def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
@@ -712,6 +772,7 @@ def test_docq_agent_has_branch_and_pending_tools(tmp_path: Path):
             call_tools=[
                 "list_docs",
                 "show_workspace",
+                "completion_status",
                 "checkout_doc",
                 "list_states",
                 "get_goals",
@@ -728,6 +789,7 @@ def test_docq_agent_has_branch_and_pending_tools(tmp_path: Path):
     payload = json.loads(result.output)
     assert "list_docs" in payload
     assert "show_workspace" in payload
+    assert "completion_status" in payload
     assert "checkout_doc" in payload
     assert "prepare_intermediate_lemma" in payload
     assert "list_pending_intermediate_lemmas" in payload

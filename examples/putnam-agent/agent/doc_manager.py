@@ -20,6 +20,7 @@ FORBIDDEN_TACTIC_PREFIX_RE = re.compile(
     r"Definition|Fixpoint|CoFixpoint|Record|Inductive|CoInductive|Class|Instance|Notation|Ltac|Axiom|"
     r"Hypothesis|Variable|Context|Qed|Admitted|Defined|Abort)\b"
 )
+PLACEHOLDER_TACTIC_RE = re.compile(r"\b(admit|admitted)\b", re.IGNORECASE)
 MutationValidator = Callable[[int, str], tuple[bool, str | None]]
 UNICODE_LOGIC_TOKENS = ("∀", "∃", "→", "↔", "⇒", "⇔", "∧", "∨", "≤", "≥", "≠", "¬")
 MISSING_IN_ENV_RE = re.compile(
@@ -236,15 +237,18 @@ class BranchSession:
         return out
 
     def get_goals(self, state_index: int = 0) -> dict[str, Any]:
-        node = self._state_node(state_index)
-        goals = self.client.goals(node.state, timeout=self.timeout)
-        pretty_goals = [getattr(goal, "pp", None) or getattr(goal, "ty", "") for goal in goals]
+        pretty_goals = self._pretty_goals(state_index)
         self._log(f"get_goals(doc_id={self.doc_id}, state={state_index}) -> {len(pretty_goals)} goals")
         return {
             "state_index": state_index,
             "goals": pretty_goals,
             "proof_finished": len(pretty_goals) == 0,
         }
+
+    def _pretty_goals(self, state_index: int) -> list[str]:
+        node = self._state_node(state_index)
+        goals = self.client.goals(node.state, timeout=self.timeout)
+        return [getattr(goal, "pp", None) or getattr(goal, "ty", "") for goal in goals]
 
     def run_tac(self, state_index: int, tactic: str) -> dict[str, Any]:
         node = self._state_node(state_index)
@@ -266,6 +270,18 @@ class BranchSession:
             error = (
                 "run_tac only accepts proof tactics, not top-level vernac commands. "
                 "Use add_import/remove_import and add_intermediate_lemma/remove_intermediate_lemma tools."
+            )
+            self._log(f"run_tac rejected(doc_id={self.doc_id}, state={state_index}): {error}")
+            return {
+                "ok": False,
+                "doc_id": self.doc_id,
+                "source_state_index": state_index,
+                "error": error,
+            }
+        if PLACEHOLDER_TACTIC_RE.search(tactic):
+            error = (
+                "run_tac rejected placeholder tactic (`admit`/`Admitted`). "
+                "Provide a real proof step."
             )
             self._log(f"run_tac rejected(doc_id={self.doc_id}, state={state_index}): {error}")
             return {
@@ -323,6 +339,34 @@ class BranchSession:
         if not tactics:
             return "exact I."
         return "\n".join(tactics)
+
+    def has_placeholder_tactic(self, state_index: int | None = None) -> bool:
+        target = self.latest_state_index if state_index is None else state_index
+        return any(PLACEHOLDER_TACTIC_RE.search(tac or "") for tac in self._tactics_path(target))
+
+    def materialized_source(self, state_index: int | None = None) -> str:
+        """Return source content with current proof script materialized as `Qed.`."""
+        target = self.latest_state_index if state_index is None else state_index
+        lines = list(self.layout.lines)
+        proof_line = self.layout.proof_line
+        end_line = self.layout.target_end_line
+
+        # Include tokens on the same line as `Proof.` / end-token if present.
+        if 0 <= proof_line < len(lines):
+            line = lines[proof_line]
+            pos = line.find(PROOF_TOKEN)
+            if pos >= 0:
+                lines[proof_line] = line[: pos + len(PROOF_TOKEN)]
+        for idx in range(proof_line, len(lines)):
+            if any(token in lines[idx] for token in END_PROOF_TOKENS):
+                end_line = idx
+                break
+
+        script_lines = [ln.rstrip() for ln in self.proof_script(target).splitlines() if ln.strip()]
+        if not script_lines:
+            script_lines = ["exact I."]
+        rebuilt = lines[: proof_line + 1] + script_lines + ["Qed."] + lines[end_line + 1 :]
+        return _join_lines(rebuilt, trailing_newline=True)
 
 
 @dataclass
@@ -570,6 +614,45 @@ class DocumentManager:
 
     def show_doc(self, *, doc_id: int) -> dict[str, Any]:
         return self.show_workspace(doc_id=doc_id)
+
+    def materialized_source(
+        self,
+        *,
+        doc_id: int | None = None,
+        state_index: int | None = None,
+    ) -> str:
+        resolved_doc_id = self._resolve_existing_doc(doc_id)
+        return self.sessions[resolved_doc_id].materialized_source(state_index=state_index)
+
+    def completion_status(self, *, doc_id: int | None = None) -> dict[str, Any]:
+        resolved_doc_id = self._resolve_existing_doc(doc_id)
+        session = self.sessions[resolved_doc_id]
+        latest_state_index = session.latest_state_index
+        latest_goals = session._pretty_goals(latest_state_index)
+        has_placeholder = session.has_placeholder_tactic(latest_state_index)
+        solved_state_indexes: list[int] = []
+        for idx in session.available_state_indexes:
+            if idx == latest_state_index:
+                done = len(latest_goals) == 0 and not has_placeholder
+            else:
+                done = len(session._pretty_goals(idx)) == 0
+            if done:
+                solved_state_indexes.append(idx)
+        preview = latest_goals[0] if latest_goals else ""
+        if len(preview) > 300:
+            preview = preview[:300] + " ..."
+        return {
+            "doc_id": resolved_doc_id,
+            "head_doc_id": self.head_doc_id,
+            "is_head_doc": resolved_doc_id == self.head_doc_id,
+            "latest_state_index": latest_state_index,
+            "latest_goals_count": len(latest_goals),
+            "latest_proof_finished": len(latest_goals) == 0 and not has_placeholder,
+            "latest_has_placeholder_tactic": has_placeholder,
+            "solved_state_indexes": solved_state_indexes,
+            "available_state_indexes": session.available_state_indexes,
+            "latest_goal_preview": preview,
+        }
 
     def _insert_block_before_target(self, base_content: str, block: str) -> str:
         layout = parse_last_target_layout(base_content)
