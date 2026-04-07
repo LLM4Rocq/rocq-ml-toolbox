@@ -36,35 +36,38 @@ def _candidate_source_paths(path: str) -> list[str]:
     if not raw:
         return []
 
-    base = Path(raw)
-    base_with_suffix = Path(raw + ".v") if base.suffix == "" else None
+    candidates: list[str] = [raw]
+    pure = PurePosixPath(raw)
+    if pure.suffix != ".v":
+        candidates.append(str(PurePosixPath(f"{raw}.v")))
 
-    candidates: list[str] = [str(base)]
-    if base_with_suffix is not None:
-        candidates.append(str(base_with_suffix))
-
-    if base.is_absolute():
-        return _dedup_preserve_order(candidates)
-
-    roots = [
-        Path("/home/rocq/.opam/4.14.2+flambda/lib/coq"),
-        Path("/home/rocq/.opam/default/lib/coq"),
-        Path("/usr/lib/coq"),
-    ]
-    prefixes = [Path("."), Path("theories"), Path("user-contrib")]
-    rel_targets = [base] + ([base_with_suffix] if base_with_suffix is not None else [])
-    for root in roots:
-        for prefix in prefixes:
-            for target in rel_targets:
-                if target is None:
-                    continue
-                candidates.append(str(root / prefix / target))
+    if not pure.is_absolute():
+        prefixed: list[str] = []
+        for prefix in ("theories", "user-contrib"):
+            pref = PurePosixPath(prefix) / pure
+            prefixed.append(str(pref))
+            if pref.suffix != ".v":
+                prefixed.append(str(PurePosixPath(f"{pref}.v")))
+        candidates.extend(prefixed)
     return _dedup_preserve_order(candidates)
+
+
+def _read_path_mode_for(candidate: str) -> str:
+    return "auto" if Path(candidate).is_absolute() else "coq_lib_relative"
+
+
+def _read_file_chunk(client: Any, path: str, *, offset: int, max_chars: int) -> dict[str, Any]:
+    path_mode = _read_path_mode_for(path)
+    try:
+        return client.read_file(path, offset=offset, max_chars=max_chars, path_mode=path_mode)
+    except TypeError:
+        # Backward compatibility for local fake clients or older transports.
+        return client.read_file(path, offset=offset, max_chars=max_chars)
 
 
 def _can_read_path(client: Any, path: str) -> bool:
     try:
-        _ = client.read_file(path, offset=0, max_chars=1)
+        _ = _read_file_chunk(client, path, offset=0, max_chars=1)
         return True
     except Exception:
         return False
@@ -182,6 +185,8 @@ class TocExplorer:
         return {
             "ok": True,
             "env": self._payload.get("env", self.env),
+            "coq_lib_path": self._payload.get("coq_lib_path"),
+            "read_path_mode": self._payload.get("read_path_mode"),
             "path": consumed,
             "root_entries": root_entries,
             "entries": entries,
@@ -201,7 +206,7 @@ def read_source_via_client(
     offset = 0
     chunks: list[str] = []
     while True:
-        chunk = client.read_file(resolved_path, offset=offset, max_chars=chunk_size)
+        chunk = _read_file_chunk(client, resolved_path, offset=offset, max_chars=chunk_size)
         text = chunk.get("content", "")
         if not isinstance(text, str):
             raise ValueError("Invalid /read_file response: content must be a string.")
