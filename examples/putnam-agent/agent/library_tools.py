@@ -31,6 +31,18 @@ def _dedup_preserve_order(values: list[str]) -> list[str]:
     return out
 
 
+def _normalize_explore_path(path: list[str] | None) -> list[str]:
+    if not path:
+        return []
+    out: list[str] = []
+    for segment in path:
+        for part in str(segment).split("/"):
+            part = part.strip()
+            if part:
+                out.append(part)
+    return out
+
+
 def _candidate_source_paths(path: str) -> list[str]:
     raw = path.strip()
     if not raw:
@@ -80,9 +92,15 @@ def _resolve_source_path(client: Any, path: str) -> str:
             return candidate
     tried_preview = candidates[:8]
     suffix = "" if len(candidates) <= len(tried_preview) else f" (+{len(candidates) - len(tried_preview)} more)"
+    hint = (
+        "Use `explore_toc` first and pass a TOC-relative file path "
+        "(for example `mathcomp/fingroup/perm.v`)."
+    )
+    if Path(path).is_absolute():
+        hint += " Absolute filesystem paths are not supported by this tool."
     raise ValueError(
         "Unable to resolve source path for read_file. "
-        f"requested={path!r} tried={tried_preview}{suffix}"
+        f"requested={path!r} tried={tried_preview}{suffix}. {hint}"
     )
 
 
@@ -128,8 +146,10 @@ class TocExplorer:
             for cid in current.get("children_ids", [])
             if cid in self._nodes_by_id
         )
+        requested_path = path or []
+        normalized_path = _normalize_explore_path(path)
         consumed: list[str] = []
-        for segment in path or []:
+        for segment in normalized_path:
             children_ids = current.get("children_ids", [])
             matched: dict[str, Any] | None = None
             for child_id in children_ids:
@@ -145,6 +165,7 @@ class TocExplorer:
                 )
                 return {
                     "ok": False,
+                    "requested_path": requested_path,
                     "path": consumed,
                     "error": f"Unknown segment {segment!r}.",
                     "available": available,
@@ -187,6 +208,7 @@ class TocExplorer:
             "env": self._payload.get("env", self.env),
             "coq_lib_path": self._payload.get("coq_lib_path"),
             "read_path_mode": self._payload.get("read_path_mode"),
+            "requested_path": requested_path,
             "path": consumed,
             "root_entries": root_entries,
             "entries": entries,

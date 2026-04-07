@@ -10,7 +10,22 @@ END_PROOF_TOKENS = ("Qed.", "Admitted.", "Defined.", "Abort.")
 TARGET_START_RE = re.compile(r"^\s*(Theorem|Lemma|Fact|Proposition|Corollary)\b")
 IMPORT_RE = re.compile(r"^\s*(From\s+\S+\s+Require\s+(Import|Export)|Require\s+Import|Import|Export)\b")
 IDENT_RE = re.compile(r"^[A-Za-z0-9_.]+$")
+FROM_REQUIRE_IMPORT_RE = re.compile(
+    r"^\s*From\s+([A-Za-z0-9_.]+)\s+Require\s+Import\s+([A-Za-z0-9_.]+)\s*\.\s*$"
+)
+LEMMA_DECL_PREFIX_RE = re.compile(r"^\s*(Lemma|Theorem|Fact|Proposition|Corollary)\b")
+LEMMA_PROOF_TOKEN_RE = re.compile(r"\b(Proof|Qed|Admitted|Defined|Abort)\b")
+FORBIDDEN_TACTIC_PREFIX_RE = re.compile(
+    r"^\s*(Lemma|Theorem|Fact|Proposition|Corollary|From|Require|Import|Export|Section|End|Module|"
+    r"Definition|Fixpoint|CoFixpoint|Record|Inductive|CoInductive|Class|Instance|Notation|Ltac|Axiom|"
+    r"Hypothesis|Variable|Context|Qed|Admitted|Defined|Abort)\b"
+)
 MutationValidator = Callable[[int, str], tuple[bool, str | None]]
+UNICODE_LOGIC_TOKENS = ("∀", "∃", "→", "↔", "⇒", "⇔", "∧", "∨", "≤", "≥", "≠", "¬")
+MISSING_IN_ENV_RE = re.compile(
+    r"(reference|variable)\s+.+\s+was not found in the current environment",
+    re.IGNORECASE,
+)
 
 
 def _join_lines(lines: list[str], *, trailing_newline: bool = True) -> str:
@@ -22,9 +37,56 @@ def _join_lines(lines: list[str], *, trailing_newline: bool = True) -> str:
 
 def _normalize_lemma_type(lemma_type: str) -> str:
     out = lemma_type.strip()
+    if "`" in out:
+        raise ValueError(
+            "Invalid `lemma_type`: markdown backticks are not allowed. "
+            "Pass only raw proposition text, e.g. "
+            "lemma_type='forall n : nat, n > 0 -> n >= 1'."
+        )
+    if any(tok in out for tok in UNICODE_LOGIC_TOKENS):
+        raise ValueError(
+            "Invalid `lemma_type`: Unicode logical symbols are not supported in tool input. "
+            "Use ASCII Coq syntax instead: `forall`, `exists`, `->`, `/\\`, `\\/`, `<=`, `>=`."
+        )
+    if LEMMA_DECL_PREFIX_RE.match(out):
+        raise ValueError(
+            "Invalid `lemma_type`: expected proposition only, not a full declaration. "
+            "Example: lemma_name='helper_x', lemma_type='forall n : nat, n > 0 -> True'."
+        )
+    if LEMMA_PROOF_TOKEN_RE.search(out):
+        raise ValueError(
+            "Invalid `lemma_type`: do not include proof commands (`Proof.`, `Qed.`, ...). "
+            "Pass only the proposition."
+        )
     if out.endswith("."):
         out = out[:-1].rstrip()
     return out
+
+
+def _tactic_error_hint(error: str) -> str | None:
+    if MISSING_IN_ENV_RE.search(error):
+        return (
+            "A referenced constant/tactic is missing in the current environment. "
+            "If this comes from a library, use `explore_toc` + `read_source_file` to find the module, "
+            "then add it via `add_import` (main) or `require_import` (subagent). "
+            "Do not guess import roots; derive `libname`/`source` from TOC entries."
+        )
+    return None
+
+
+def _normalize_import_parts(libname: str, source: str) -> tuple[str, str]:
+    lib = libname.strip()
+    src = source.strip()
+
+    stmt_in_source = FROM_REQUIRE_IMPORT_RE.match(src)
+    if stmt_in_source:
+        return stmt_in_source.group(1), stmt_in_source.group(2)
+
+    stmt_in_libname = FROM_REQUIRE_IMPORT_RE.match(lib)
+    if stmt_in_libname:
+        return stmt_in_libname.group(1), stmt_in_libname.group(2)
+
+    return lib, src
 
 
 def _indent_proof_body(body: str) -> str:
@@ -137,6 +199,7 @@ class BranchSession:
     client: Any
     doc_id: int
     source_path: Path
+    source_content: str
     layout: ParsedDocumentLayout
     timeout: float
     nodes: list[StateNode] = field(default_factory=list)
@@ -176,6 +239,7 @@ class BranchSession:
         node = self._state_node(state_index)
         goals = self.client.goals(node.state, timeout=self.timeout)
         pretty_goals = [getattr(goal, "pp", None) or getattr(goal, "ty", "") for goal in goals]
+        self._log(f"get_goals(doc_id={self.doc_id}, state={state_index}) -> {len(pretty_goals)} goals")
         return {
             "state_index": state_index,
             "goals": pretty_goals,
@@ -185,20 +249,54 @@ class BranchSession:
     def run_tac(self, state_index: int, tactic: str) -> dict[str, Any]:
         node = self._state_node(state_index)
         self._log(f"run_tac(doc_id={self.doc_id}, state={state_index}, tactic={tactic!r})")
-        try:
-            new_state = self.client.run(node.state, tactic, timeout=self.timeout)
-        except Exception as exc:
+        stripped_tactic = tactic.strip()
+        if stripped_tactic.startswith("`") or stripped_tactic.endswith("`"):
+            error = (
+                "run_tac received markdown-wrapped tactic. "
+                "Pass raw tactic text without backticks, e.g. `intro n.` not \"`intro n.`\"."
+            )
+            self._log(f"run_tac rejected(doc_id={self.doc_id}, state={state_index}): {error}")
             return {
                 "ok": False,
                 "doc_id": self.doc_id,
                 "source_state_index": state_index,
-                "error": str(exc),
+                "error": error,
             }
+        if FORBIDDEN_TACTIC_PREFIX_RE.match(tactic):
+            error = (
+                "run_tac only accepts proof tactics, not top-level vernac commands. "
+                "Use add_import/remove_import and add_intermediate_lemma/remove_intermediate_lemma tools."
+            )
+            self._log(f"run_tac rejected(doc_id={self.doc_id}, state={state_index}): {error}")
+            return {
+                "ok": False,
+                "doc_id": self.doc_id,
+                "source_state_index": state_index,
+                "error": error,
+            }
+        try:
+            new_state = self.client.run(node.state, tactic, timeout=self.timeout)
+        except Exception as exc:
+            error = str(exc)
+            hint = _tactic_error_hint(error)
+            self._log(f"run_tac failed(doc_id={self.doc_id}, state={state_index}): {error}")
+            if hint:
+                self._log(f"run_tac hint(doc_id={self.doc_id}, state={state_index}): {hint}")
+            out = {
+                "ok": False,
+                "doc_id": self.doc_id,
+                "source_state_index": state_index,
+                "error": error,
+            }
+            if hint:
+                out["hint"] = hint
+            return out
 
         new_idx = len(self.nodes)
         self.nodes.append(StateNode(index=new_idx, parent_index=state_index, tactic=tactic, state=new_state))
         goals = self.client.goals(new_state, timeout=self.timeout)
         pretty_goals = [getattr(goal, "pp", None) or getattr(goal, "ty", "") for goal in goals]
+        self._log(f"run_tac ok(doc_id={self.doc_id}) -> new_state_index={new_idx}, goals={len(pretty_goals)}")
         return {
             "ok": True,
             "doc_id": self.doc_id,
@@ -261,14 +359,21 @@ class DocumentManager:
         self.head_doc_id = 0
         self._next_doc_id = 1
         self._next_lemma_id = 1
+        self._next_transient_doc_id = -1
 
     def _log(self, message: str) -> None:
         if self.logger:
             self.logger(message)
 
-    def _new_branch_session(self, doc_id: int, content: str) -> BranchSession:
+    def _new_branch_session(
+        self,
+        doc_id: int,
+        content: str,
+        *,
+        purpose: str | None = None,
+    ) -> BranchSession:
         tmp_path = Path(
-            self.client.tmp_file(content=content, root=str(self.source_path.parent)),
+            self.client.tmp_file(content=content),
         ).resolve()
         layout = parse_last_target_layout(content)
         state0 = self.client.get_state_at_pos(
@@ -277,15 +382,36 @@ class DocumentManager:
             layout.proof_character,
             timeout=self.timeout,
         )
-        return BranchSession(
+        session = BranchSession(
             client=self.client,
             doc_id=doc_id,
             source_path=tmp_path,
+            source_content=content,
             layout=layout,
             timeout=self.timeout,
             nodes=[StateNode(index=0, parent_index=None, tactic=None, state=state0)],
             logger=self.logger,
         )
+        if doc_id < 0:
+            prefix = "initialized transient doc session"
+            if purpose:
+                prefix += f" ({purpose})"
+            self._log(
+                f"{prefix} at state 0 "
+                f"(transient_doc_id={doc_id}, source={tmp_path}, "
+                f"line={layout.proof_line}, character={layout.proof_character})"
+            )
+        else:
+            self._log(
+                f"initialized doc_id={doc_id} at state 0 "
+                f"(source={tmp_path}, line={layout.proof_line}, character={layout.proof_character})"
+            )
+        return session
+
+    def _alloc_transient_doc_id(self) -> int:
+        out = self._next_transient_doc_id
+        self._next_transient_doc_id -= 1
+        return out
 
     def _resolve_existing_doc(self, doc_id: int | None) -> int:
         if doc_id is None:
@@ -297,6 +423,16 @@ class DocumentManager:
 
     def _resolve_doc_for_mutation(self, doc_id: int | None) -> int:
         return self._resolve_existing_doc(doc_id)
+
+    def doc_id_for_source_path(self, source_path: str | Path) -> int | None:
+        try:
+            resolved = Path(source_path).resolve()
+        except Exception:
+            return None
+        for doc_id, session in self.sessions.items():
+            if session.source_path.resolve() == resolved:
+                return doc_id
+        return None
 
     def _create_mutation(self, *, base_doc_id: int, label: str, content: str) -> dict[str, Any]:
         branched = base_doc_id != self.head_doc_id
@@ -484,6 +620,7 @@ class DocumentManager:
         return (start_idx, end_idx)
 
     def add_import(self, *, libname: str, source: str, doc_id: int | None = None) -> dict[str, Any]:
+        libname, source = _normalize_import_parts(libname, source)
         if not IDENT_RE.match(libname):
             raise ValueError(f"Invalid libname={libname!r}.")
         if not IDENT_RE.match(source):
@@ -494,6 +631,9 @@ class DocumentManager:
         layout = parse_last_target_layout(base)
 
         statement = f"From {libname} Require Import {source}."
+        self._log(
+            f"add_import called(doc_id={resolved_doc_id}, libname={libname!r}, source={source!r})"
+        )
         prefix = list(layout.prefix_lines)
         idx = self._import_insert_index(prefix)
         prefix.insert(idx, statement)
@@ -505,9 +645,11 @@ class DocumentManager:
             content=new_content,
         )
         result["statement"] = statement
+        self._log(f"add_import ok(doc_id={result['doc_id']}, statement={statement!r})")
         return result
 
     def remove_import(self, *, libname: str, source: str, doc_id: int | None = None) -> dict[str, Any]:
+        libname, source = _normalize_import_parts(libname, source)
         if not IDENT_RE.match(libname):
             raise ValueError(f"Invalid libname={libname!r}.")
         if not IDENT_RE.match(source):
@@ -521,6 +663,9 @@ class DocumentManager:
         if idx < 0:
             raise ValueError(f"Import not found: From {libname} Require Import {source}.")
 
+        self._log(
+            f"remove_import called(doc_id={resolved_doc_id}, libname={libname!r}, source={source!r})"
+        )
         removed = prefix.pop(idx).strip()
         prefix = _remove_blank_padding(prefix)
         new_content = _join_lines(prefix + layout.target_lines + layout.suffix_lines, trailing_newline=True)
@@ -530,6 +675,7 @@ class DocumentManager:
             content=new_content,
         )
         result["removed_statement"] = removed
+        self._log(f"remove_import ok(doc_id={result['doc_id']}, statement={removed!r})")
         return result
 
     def next_lemma_name(self) -> str:
@@ -555,7 +701,14 @@ class DocumentManager:
         # Type-check gate: statement must parse/type-check before sub-agent starts.
         probe_block = "\n".join([lemma_statement, "Proof.", "  admit.", "Admitted."])
         probe_content = self._insert_block_before_target(base_content, probe_block)
-        _ = self._new_branch_session(doc_id=-1, content=probe_content)
+        probe_session = self._new_branch_session(
+            doc_id=self._alloc_transient_doc_id(),
+            content=probe_content,
+            purpose="lemma_typecheck_probe",
+        )
+        probe_check = probe_session.run_tac(0, f"pose proof ({lemma_name}).")
+        if not probe_check.get("ok", False):
+            raise ValueError(f"Lemma declaration/type-check failed: {probe_check.get('error', 'unknown error')}")
 
         layout = parse_last_target_layout(base_content)
         lines = list(layout.prefix_lines)
@@ -566,7 +719,19 @@ class DocumentManager:
             lines.append("")
             lines.extend(layout.suffix_lines)
         sub_content = _join_lines(lines, trailing_newline=True)
-        sub_session = self._new_branch_session(doc_id=-1, content=sub_content)
+        sub_session = self._new_branch_session(
+            doc_id=self._alloc_transient_doc_id(),
+            content=sub_content,
+            purpose="lemma_subgoal_workspace",
+        )
+        goals = sub_session.get_goals(0).get("goals", [])
+        if len(goals) == 0:
+            raise ValueError(
+                "Intermediate lemma sub-session started with zero goals. "
+                "This usually indicates an invalid or non-open proof context. "
+                "Check that `lemma_type` is a valid proposition and uses ASCII Coq syntax "
+                "(`forall`, `exists`, `->`, `/\\`, `\\/`, `<=`, `>=`)."
+            )
         return resolved_doc_id, sub_session
 
     def register_proved_lemma(
