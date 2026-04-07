@@ -76,8 +76,7 @@ class FakeClient:
         return [Goal(info={}, hyps=[], ty=f"goal-{state.st}", pp=f"goal-{state.st}")]
 
     def tmp_file(self, content: str | None = None, root: str | None = None) -> str:
-        assert root is not None
-        root_path = Path(root)
+        root_path = Path(root) if root is not None else Path(tempfile.mkdtemp())
         root_path.mkdir(parents=True, exist_ok=True)
         fd, path = tempfile.mkstemp(dir=str(root_path), suffix=".v")
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -136,9 +135,10 @@ def test_session_initial_state_and_branching_indexes():
 
     assert client.connected is True
     assert session.available_state_indexes == [0]
-    assert client.get_state_calls == [
-        (str(problem.source_path), problem.proof_line, problem.proof_character, 12.0)
-    ]
+    assert client.tmp_file_calls, "tmp_file was not called to stage source"
+    staged_source = client.tmp_file_calls[0]["path"]
+    assert staged_source is not None
+    assert client.get_state_calls == [(staged_source, problem.proof_line, problem.proof_character, 12.0)]
 
     first = session.run_tac(0, "idtac.")
     second = session.run_tac(0, "idtac.")
@@ -161,13 +161,13 @@ def test_safe_verify_uses_tmp_file_inside_putnam_root():
 
     assert client.tmp_file_calls, "tmp_file was not called"
     tmp_call = client.tmp_file_calls[-1]
-    assert tmp_call["root"] == str(problem.bench_root)
+    assert tmp_call["root"] == str(session.proof_root)
 
     assert client.safeverify_calls, "safeverify was not called"
     sv_call = client.safeverify_calls[-1]
-    assert sv_call["source"] == str(problem.source_path)
-    assert sv_call["root"] == str(problem.bench_root)
-    assert Path(sv_call["target"]).resolve().is_relative_to(problem.bench_root.resolve())
+    assert sv_call["source"] == str(session.source_path)
+    assert sv_call["root"] == str(session.proof_root)
+    assert Path(sv_call["target"]).resolve().is_relative_to(session.proof_root.resolve())
 
 
 def test_end_fails_when_safeverify_fails():

@@ -135,6 +135,9 @@ def iter_putnam_problems(
 class PutnamAgentSession:
     client: Any
     problem: PutnamBenchProblem
+    source_path: Path
+    proof_root: Path
+    source_content: str
     timeout: float = 60.0
     states: list[Any] = field(default_factory=list)
     logger: Callable[[str], None] | None = None
@@ -155,15 +158,21 @@ class PutnamAgentSession:
     ) -> "PutnamAgentSession":
         if connect:
             client.connect()
+        source_content = problem.source_path.read_text(encoding="utf-8")
+        staged_source = Path(client.tmp_file(content=source_content)).resolve()
         initial_state = client.get_state_at_pos(
-            str(problem.source_path),
+            str(staged_source),
             problem.proof_line,
             problem.proof_character,
             timeout=timeout,
         )
+        proof_root = staged_source.parent
         session = cls(
             client=client,
             problem=problem,
+            source_path=staged_source,
+            proof_root=proof_root,
+            source_content=source_content,
             timeout=timeout,
             states=[initial_state],
             logger=logger,
@@ -172,7 +181,7 @@ class PutnamAgentSession:
         )
         session._log(
             "initialized at state 0 "
-            f"({problem.source_path}:{problem.proof_line}:{problem.proof_character})"
+            f"(source={staged_source}, line={problem.proof_line}, character={problem.proof_character})"
         )
         return session
 
@@ -230,7 +239,7 @@ class PutnamAgentSession:
         }
 
     def _candidate_content(self, final_proof: str) -> str:
-        source = self.problem.source_path.read_text(encoding="utf-8")
+        source = self.source_content
         proof = _normalize_final_proof(final_proof)
 
         match = PROOF_BLOCK_RE.search(source)
@@ -248,11 +257,11 @@ class PutnamAgentSession:
     def safe_verify(self, final_proof: str) -> dict[str, Any]:
         self._log("safe_verify started")
         target_content = self._candidate_content(final_proof)
-        target = self.client.tmp_file(content=target_content, root=str(self.problem.bench_root))
+        target = self.client.tmp_file(content=target_content, root=str(self.proof_root))
         report = self.client.safeverify(
-            source=str(self.problem.source_path),
+            source=str(self.source_path),
             target=target,
-            root=str(self.problem.bench_root),
+            root=str(self.proof_root),
             verbose=True,
         )
         summary = report.get("summary", {}) if isinstance(report, dict) else {}
