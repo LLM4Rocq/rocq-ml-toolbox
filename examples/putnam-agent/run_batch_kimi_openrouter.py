@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.settings import ModelSettings
 
 THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
@@ -26,6 +27,8 @@ DEFAULT_PROBLEM = THIS_DIR / "putnam" / "mathcomp" / "putnam_1965_a5.v"
 DEFAULT_BENCH_ROOT = THIS_DIR / "putnam"
 DEFAULT_MODEL = "moonshotai/kimi-k2.5"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_TEMPERATURE = 1.0
+DEFAULT_TOP_P = 0.95
 DEFAULT_PROMPT = (
     "Prove the theorem. Start from state index 0. Use run_tac/get_goals/list_states as needed. "
     "Before finishing, call safe_verify(final_proof), then call end(final_proof). "
@@ -64,6 +67,18 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY"),
         help="OpenRouter API key (or set OPENROUTER_API_KEY).",
     )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=DEFAULT_TEMPERATURE,
+        help=f"Sampling temperature (default: {DEFAULT_TEMPERATURE}).",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=DEFAULT_TOP_P,
+        help=f"Nucleus sampling top-p (default: {DEFAULT_TOP_P}).",
+    )
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="Prompt used for every agent.")
     parser.add_argument(
         "--quiet",
@@ -73,9 +88,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _build_model(base_url: str, api_key: str, model_name: str) -> OpenAIChatModel:
+def _build_model(
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    *,
+    temperature: float,
+    top_p: float,
+) -> OpenAIChatModel:
     provider = OpenAIProvider(base_url=base_url, api_key=api_key)
-    return OpenAIChatModel(model_name, provider=provider)
+    settings = ModelSettings(temperature=temperature, top_p=top_p)
+    return OpenAIChatModel(model_name, provider=provider, settings=settings)
 
 
 def main() -> int:
@@ -84,11 +107,21 @@ def main() -> int:
         raise SystemExit("--num-agents must be >= 1")
     if args.max_concurrency is not None and args.max_concurrency < 1:
         raise SystemExit("--max-concurrency must be >= 1")
+    if not (0.0 <= args.temperature <= 2.0):
+        raise SystemExit("--temperature must be in [0, 2]")
+    if not (0.0 < args.top_p <= 1.0):
+        raise SystemExit("--top-p must be in (0, 1]")
     if not args.openrouter_api_key:
         raise SystemExit("Missing OpenRouter API key. Use --openrouter-api-key or OPENROUTER_API_KEY.")
 
     problem = PutnamBenchProblem.from_file(args.problem, bench_root=args.bench_root)
-    model = _build_model(args.openrouter_base_url, args.openrouter_api_key, args.model)
+    model = _build_model(
+        args.openrouter_base_url,
+        args.openrouter_api_key,
+        args.model,
+        temperature=args.temperature,
+        top_p=args.top_p,
+    )
     agent = build_scalable_putnam_agent(model=model)
 
     logger = None if args.quiet else make_console_logger("putnam-batch")
