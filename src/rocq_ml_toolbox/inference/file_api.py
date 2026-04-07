@@ -38,6 +38,12 @@ class FsAccessMode(StrEnum):
     RW_ANYWHERE = "rw_anywhere"
 
 
+class ReadPathMode(StrEnum):
+    AUTO = "auto"
+    COQ_LIB_RELATIVE = "coq_lib_relative"
+    ABSOLUTE = "absolute"
+
+
 @dataclass(frozen=True)
 class FileAccessConfig:
     mode: FsAccessMode
@@ -262,6 +268,7 @@ class ReadFileBody(BaseModel):
     path: str
     offset: int = 0
     max_chars: int = 20000
+    path_mode: ReadPathMode = ReadPathMode.AUTO
 
 
 class WriteFileBody(BaseModel):
@@ -306,6 +313,22 @@ def _extract_docstring_entries(nodes: list[Any]) -> list[dict[str, Any]]:
 
 
 router = APIRouter()
+
+
+def _resolve_read_path(path: str, *, cfg: FileAccessConfig, path_mode: ReadPathMode) -> Path:
+    raw = (path or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="path must be non-empty")
+
+    if path_mode == ReadPathMode.COQ_LIB_RELATIVE:
+        return (cfg.coq_lib_path / PurePosixPath(raw.lstrip("/"))).expanduser().resolve()
+    if path_mode == ReadPathMode.ABSOLUTE:
+        return Path(raw).expanduser().resolve()
+
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate.expanduser().resolve()
+    return (cfg.coq_lib_path / PurePosixPath(raw)).expanduser().resolve()
 
 
 def _list_available_env_tocs(coq_lib_path: Path) -> list[tuple[str, Path]]:
@@ -377,6 +400,9 @@ def access_libraries(body: AccessLibrariesBody, request: FastAPIRequest):
         )
 
     payload = _enrich_file_nodes_with_line_count(payload, cfg.coq_lib_path)
+    payload = dict(payload)
+    payload["coq_lib_path"] = str(cfg.coq_lib_path)
+    payload["read_path_mode"] = ReadPathMode.COQ_LIB_RELATIVE.value
     cache[key] = payload
     return payload
 
@@ -389,9 +415,24 @@ def read_file(body: ReadFileBody, request: FastAPIRequest):
         raise HTTPException(status_code=400, detail="max_chars must be > 0")
 
     cfg: FileAccessConfig = request.app.state.file_access
-    path = _assert_read_allowed(Path(body.path), cfg)
+    resolved_path = _resolve_read_path(body.path, cfg=cfg, path_mode=body.path_mode)
+    path = _assert_read_allowed(resolved_path, cfg)
     if not path.exists() or not path.is_file():
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "File not found.",
+                "requested_path": body.path,
+                "resolved_path": str(path),
+                "path_mode": body.path_mode.value,
+                "coq_lib_path": str(cfg.coq_lib_path),
+                "hint": (
+                    "Use /access_libraries first, pick a file `path` from TOC entries, "
+                    "then call /read_file with that relative path "
+                    f"and `path_mode={ReadPathMode.COQ_LIB_RELATIVE.value}`."
+                ),
+            },
+        )
 
     content = path.read_text(encoding="utf-8", errors="replace")
     total_chars = len(content)

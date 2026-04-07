@@ -69,6 +69,8 @@ def test_access_libraries_prefers_precomputed_env_toc(tmp_path: Path):
         req,
     )
     assert result["env"] == "coq-demo"
+    assert result["coq_lib_path"] == str(coq_lib)
+    assert result["read_path_mode"] == inference_server.ReadPathMode.COQ_LIB_RELATIVE.value
     file_nodes = [n for n in result["nodes"] if n.get("type") == "file"]
     assert file_nodes
     assert file_nodes[0].get("line_count") == 4
@@ -148,6 +150,22 @@ def test_read_file_chunking(tmp_path: Path):
     assert second["total_chars"] == 6
 
 
+def test_read_file_relative_path_defaults_to_coq_lib(tmp_path: Path):
+    coq_lib = tmp_path / "coq-lib"
+    (coq_lib / "theories").mkdir(parents=True)
+    p = coq_lib / "theories" / "Demo.v"
+    p.write_text("abcdef", encoding="utf-8")
+    req = _request_with_config(mode=inference_server.FsAccessMode.READ_LIB_ONLY, coq_lib_path=coq_lib)
+
+    out = inference_server.read_file(
+        inference_server.ReadFileBody(path="theories/Demo.v", offset=1, max_chars=3),
+        req,
+    )
+    assert out["path"] == str(p.resolve())
+    assert out["content"] == "bcd"
+    assert out["eof"] is False
+
+
 def test_read_file_allowed_by_fs_read_allow(tmp_path: Path):
     coq_lib = tmp_path / "coq-lib"
     coq_lib.mkdir()
@@ -166,6 +184,27 @@ def test_read_file_allowed_by_fs_read_allow(tmp_path: Path):
         req,
     )
     assert out["content"] == "demo"
+
+
+def test_read_file_missing_has_toc_hint(tmp_path: Path):
+    coq_lib = tmp_path / "coq-lib"
+    coq_lib.mkdir()
+    req = _request_with_config(mode=inference_server.FsAccessMode.READ_LIB_ONLY, coq_lib_path=coq_lib)
+
+    with pytest.raises(HTTPException) as exc:
+        inference_server.read_file(
+            inference_server.ReadFileBody(
+                path="theories/Missing.v",
+                offset=0,
+                max_chars=10,
+                path_mode=inference_server.ReadPathMode.COQ_LIB_RELATIVE,
+            ),
+            req,
+        )
+    assert exc.value.status_code == 404
+    detail = exc.value.detail
+    assert isinstance(detail, dict)
+    assert "Use /access_libraries first" in str(detail.get("hint"))
 
 
 def test_write_file_policy_and_rw_mode(tmp_path: Path):

@@ -24,6 +24,7 @@ from .file_api import (
     FsAccessMode,
     ReadDocstringsBody,
     ReadFileBody,
+    ReadPathMode,
     WriteFileBody,
     access_libraries,
     read_docstrings,
