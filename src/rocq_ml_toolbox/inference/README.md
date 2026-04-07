@@ -51,7 +51,7 @@ print(report["summary"])
 - `POST /get_glob`: load/compile and return `.glob` data.
 - `POST /safeverify`: run SafeVerify in the server environment.
 - `POST /tmp_file`: allocate a temporary `.v` file path.
-- `POST /access_libraries`: load `<coq_lib>/<env>.toc.json` or fallback-scan `theories` + `user-contrib`.
+- `POST /access_libraries`: load `<coq_lib>/<env>.toc.json` (env optional when a single TOC exists) or fallback-scan `theories` + `user-contrib`.
 - `POST /read_file`: chunked UTF-8 file reads (`offset`, `max_chars`).
 - `POST /write_file`: chunked writes (`offset`, `truncate`) with startup fs policy enforcement.
 - `POST /read_docstrings`: load docstring entries from `<source>.toc.json`.

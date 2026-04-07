@@ -205,6 +205,15 @@ def _source_file(tmp_path: Path) -> Path:
     return source
 
 
+def _tool_names(agent: Any) -> set[str]:
+    toolset = getattr(agent, "_function_toolset", None)
+    if toolset is not None:
+        tools_dict = getattr(toolset, "tools", None)
+        if isinstance(tools_dict, dict):
+            return {str(name) for name in tools_dict.keys()}
+    return set()
+
+
 def test_document_manager_state_branching(tmp_path: Path):
     client = FakeClient()
     manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
@@ -477,6 +486,14 @@ def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
     assert "abort" in payload
 
 
+def test_docq_subagent_can_disable_semantic_tool():
+    agent = build_docq_subagent(model=TestModel(), include_semantic_tool=False)
+    names = _tool_names(agent)
+    assert "semantic_doc_search" not in names
+    assert "explore_toc" in names
+    assert "run_tac" in names
+
+
 def test_docq_agent_has_branch_and_pending_tools(tmp_path: Path):
     client = FakeClient()
     session = DocqAgentSession.from_source(
@@ -511,6 +528,24 @@ def test_docq_agent_has_branch_and_pending_tools(tmp_path: Path):
     assert "prepare_intermediate_lemma" in payload
     assert "list_pending_intermediate_lemmas" in payload
     assert "drop_pending_intermediate_lemma" in payload
+
+
+def test_docq_agent_can_disable_semantic_tool(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+        include_semantic_tool=False,
+    )
+    agent = build_docq_agent(model=TestModel(), include_semantic_tool=False)
+    names = _tool_names(agent)
+    assert "semantic_doc_search" not in names
+    assert "explore_toc" in names
+    assert "add_import" in names
+    assert session.include_semantic_tool is False
 
 
 def test_toc_explorer_and_read_source_trim(tmp_path: Path):

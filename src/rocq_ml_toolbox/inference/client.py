@@ -79,7 +79,7 @@ class PytanqueExtended(Pytanque):
 
     def access_libraries(
         self,
-        env: str,
+        env: str | None = None,
         *,
         use_cache: bool = True,
         include_theories: bool = True,

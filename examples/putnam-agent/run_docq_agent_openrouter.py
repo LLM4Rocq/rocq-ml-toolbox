@@ -31,7 +31,14 @@ DEFAULT_PROMPT = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the docq agent on one Rocq source file.")
     parser.add_argument("--source", required=True, help="Path to source .v file to manipulate.")
-    parser.add_argument("--env", required=True, help="Environment id used by /access_libraries.")
+    parser.add_argument(
+        "--env",
+        default=None,
+        help=(
+            "Optional environment id for /access_libraries "
+            "(needed only if multiple <coq_lib>/*.toc.json files exist)."
+        ),
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--timeout", type=float, default=90.0)
@@ -48,6 +55,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--semantic-base-url", default=os.getenv("DOCQ_SEARCH_BASE_URL"))
     parser.add_argument("--semantic-route", default=os.getenv("DOCQ_SEARCH_ROUTE", "/search"))
     parser.add_argument("--semantic-api-key", default=os.getenv("DOCQ_SEARCH_API_KEY"))
+    parser.add_argument(
+        "--disable-semantic-tool",
+        action="store_true",
+        help="Disable semantic_doc_search tool exposure (main + sub-agent).",
+    )
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     return parser.parse_args()
 
@@ -70,10 +82,14 @@ def main() -> int:
         semantic_route=args.semantic_route,
         semantic_api_key=args.semantic_api_key,
         max_tool_calls=args.max_tool_calls,
+        include_semantic_tool=not args.disable_semantic_tool,
     )
     provider = OpenAIProvider(base_url=args.openrouter_base_url, api_key=args.openrouter_api_key)
     model = OpenAIChatModel(args.model, provider=provider)
-    agent = build_docq_agent(model=model)
+    agent = build_docq_agent(
+        model=model,
+        include_semantic_tool=not args.disable_semantic_tool,
+    )
     result = agent.run_sync(
         args.prompt,
         deps=session,

@@ -86,7 +86,7 @@ def _resolve_source_path(client: Any, path: str) -> str:
 @dataclass
 class TocExplorer:
     client: Any
-    env: str
+    env: str | None = None
     include_theories: bool = True
     include_user_contrib: bool = True
     use_cache: bool = True
@@ -181,7 +181,7 @@ class TocExplorer:
         entries.sort(key=lambda x: (0 if x.get("kind") == "directory" else 1, str(x.get("name", ""))))
         return {
             "ok": True,
-            "env": self.env,
+            "env": self._payload.get("env", self.env),
             "path": consumed,
             "root_entries": root_entries,
             "entries": entries,

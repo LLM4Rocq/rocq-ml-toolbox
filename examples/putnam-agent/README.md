@@ -7,6 +7,8 @@ This benchmark folder ships with one agent implementation in
 
 It uses one `PytanqueExtended` client per agent session and initializes the proof state with
 `get_state_at_pos` at the end of `Proof.`.
+When the server runs in Docker, the session first uploads the local benchmark file via `/tmp_file`
+and then works on that server-side staged path (including `safe_verify`).
 
 ## Docker Quickstart
 
@@ -173,6 +175,7 @@ TOC note:
 
 - Some env-level TOCs expose logical module paths without `.v` suffix (for example `mathcomp/boot/ssrbool`).
 - `read_source_file` now resolves both logical paths and `.v` paths automatically.
+- `--env` is optional if exactly one `<coq_lib>/*.toc.json` is present in the server image.
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... \
@@ -189,3 +192,14 @@ Optional semantic search env vars:
 - `DOCQ_SEARCH_BASE_URL` (required to enable `semantic_doc_search`)
 - `DOCQ_SEARCH_ROUTE` (default: `/search`)
 - `DOCQ_SEARCH_API_KEY` (optional bearer token)
+
+If retrieval is not available yet and you want to hide that tool entirely:
+
+```bash
+OPENROUTER_API_KEY=sk-or-... \
+python examples/putnam-agent/run_docq_agent_openrouter.py \
+  --source /path/to/file.v \
+  --host 127.0.0.1 \
+  --port 5000 \
+  --disable-semantic-tool
+```

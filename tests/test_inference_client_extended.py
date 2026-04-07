@@ -44,6 +44,23 @@ def test_client_access_libraries_and_read_docstrings_validation(monkeypatch):
     assert calls[1][1]["source"] == "/tmp/A.v"
 
 
+def test_client_access_libraries_without_env(monkeypatch):
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_post(url: str, json: dict[str, Any]):
+        calls.append((url, json))
+        if url.endswith("/access_libraries"):
+            return _FakeResponse({"env": "coq-auto", "nodes": [], "file_index": {}})
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    client = PytanqueExtended("127.0.0.1", 5000)
+
+    toc = client.access_libraries()
+    assert toc["env"] == "coq-auto"
+    assert calls[0][1]["env"] is None
+
+
 def test_client_read_write_file_validation(monkeypatch):
     def fake_post(url: str, json: dict[str, Any]):
         if url.endswith("/read_file"):

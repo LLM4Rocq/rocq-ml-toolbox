@@ -92,6 +92,38 @@ def test_access_libraries_fallback_scans_and_caches(tmp_path: Path):
     assert any(n.get("path", "").endswith(".v") for n in first["nodes"] if n.get("type") == "file")
 
 
+def test_access_libraries_auto_env_from_single_toc(tmp_path: Path):
+    coq_lib = tmp_path / "coq-lib"
+    coq_lib.mkdir()
+    toc = {
+        "env": "coq-auto",
+        "generated_at": "2026-01-01T00:00:00Z",
+        "root_id": "dir:ROOT",
+        "nodes": [],
+        "file_index": {},
+    }
+    (coq_lib / "coq-auto.toc.json").write_text(json.dumps(toc), encoding="utf-8")
+    req = _request_with_config(mode=inference_server.FsAccessMode.READ_LIB_ONLY, coq_lib_path=coq_lib)
+
+    result = inference_server.access_libraries(inference_server.AccessLibrariesBody(), req)
+    assert result["env"] == "coq-auto"
+
+
+def test_access_libraries_auto_env_rejects_ambiguous_multiple_tocs(tmp_path: Path):
+    coq_lib = tmp_path / "coq-lib"
+    coq_lib.mkdir()
+    (coq_lib / "coq-a.toc.json").write_text("{}", encoding="utf-8")
+    (coq_lib / "coq-b.toc.json").write_text("{}", encoding="utf-8")
+    req = _request_with_config(mode=inference_server.FsAccessMode.READ_LIB_ONLY, coq_lib_path=coq_lib)
+
+    with pytest.raises(HTTPException) as exc:
+        inference_server.access_libraries(inference_server.AccessLibrariesBody(), req)
+    assert exc.value.status_code == 400
+    detail = exc.value.detail
+    assert isinstance(detail, dict)
+    assert sorted(detail.get("available_envs", [])) == ["coq-a", "coq-b"]
+
+
 def test_read_file_chunking(tmp_path: Path):
     coq_lib = tmp_path / "coq-lib"
     coq_lib.mkdir()

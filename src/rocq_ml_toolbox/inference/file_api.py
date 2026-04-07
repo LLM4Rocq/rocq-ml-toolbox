@@ -252,7 +252,7 @@ def _fallback_toc_from_roots(
 
 
 class AccessLibrariesBody(BaseModel):
-    env: str
+    env: str | None = None
     use_cache: bool = True
     include_theories: bool = True
     include_user_contrib: bool = True
@@ -308,31 +308,69 @@ def _extract_docstring_entries(nodes: list[Any]) -> list[dict[str, Any]]:
 router = APIRouter()
 
 
+def _list_available_env_tocs(coq_lib_path: Path) -> list[tuple[str, Path]]:
+    out: list[tuple[str, Path]] = []
+    for toc in sorted(coq_lib_path.glob("*.toc.json")):
+        name = toc.name
+        if not name.endswith(".toc.json"):
+            continue
+        env = name[: -len(".toc.json")].strip()
+        if not env:
+            continue
+        out.append((env, toc))
+    return out
+
+
+def _resolve_requested_env(
+    *,
+    cfg: FileAccessConfig,
+    requested_env: str | None,
+) -> tuple[str, Path | None]:
+    env = (requested_env or "").strip()
+    if env:
+        return env, (cfg.coq_lib_path / f"{env}.toc.json")
+
+    available = _list_available_env_tocs(cfg.coq_lib_path)
+    if len(available) == 1:
+        return available[0]
+    if len(available) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Multiple env TOC files found; specify `env` explicitly.",
+                "available_envs": [name for (name, _path) in available],
+            },
+        )
+    return "auto", None
+
+
 @router.post("/access_libraries")
 def access_libraries(body: AccessLibrariesBody, request: FastAPIRequest):
     cfg: FileAccessConfig = request.app.state.file_access
     cache: dict[tuple[str, str, bool, bool], dict[str, Any]] = request.app.state.toc_cache
+    resolved_env, env_toc_path = _resolve_requested_env(cfg=cfg, requested_env=body.env)
     key = (
         str(cfg.coq_lib_path),
-        body.env,
+        resolved_env,
         bool(body.include_theories),
         bool(body.include_user_contrib),
     )
     if body.use_cache and key in cache:
         return cache[key]
 
-    env_toc_path = cfg.coq_lib_path / f"{body.env}.toc.json"
     payload: dict[str, Any]
-    if env_toc_path.exists():
+    if env_toc_path is not None and env_toc_path.exists():
         _assert_read_allowed(env_toc_path, cfg)
         with env_toc_path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
         if not isinstance(data, dict):
             raise HTTPException(status_code=500, detail=f"Invalid env TOC format in {env_toc_path}.")
         payload = data
+        if "env" not in payload or not isinstance(payload.get("env"), str):
+            payload["env"] = resolved_env
     else:
         payload = _fallback_toc_from_roots(
-            env=body.env,
+            env=resolved_env,
             coq_lib_path=cfg.coq_lib_path,
             include_theories=body.include_theories,
             include_user_contrib=body.include_user_contrib,

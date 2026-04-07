@@ -41,6 +41,22 @@ LEMMA_SUBAGENT_SYSTEM_PROMPT = (
 )
 
 
+def _lemma_subagent_prompt(*, include_semantic_tool: bool) -> str:
+    retrieval_line = "`explore_toc`, `semantic_doc_search`, `read_source_file`"
+    if not include_semantic_tool:
+        retrieval_line = "`explore_toc`, `read_source_file`"
+    return (
+        "You are proving one intermediate lemma.\n"
+        "Use tools:\n"
+        f"- {retrieval_line}\n"
+        "- `show_workspace`, `read_workspace_source`\n"
+        "- `list_states`, `get_goals`, `run_tac`\n"
+        "- `require_import(libname, source)` if the lemma proof needs a new import.\n"
+        "- `abort(explanation)` if the lemma is likely wrong/unprovable.\n"
+        "Goal: finish with no remaining goals."
+    )
+
+
 @dataclass
 class LemmaSubSession:
     branch: BranchSession
@@ -62,13 +78,18 @@ class PendingLemma:
 _IDENT_RE = re.compile(r"^[A-Za-z0-9_.]+$")
 
 
-def build_docq_subagent(model: Any = None, *, retries: int = 1) -> Agent[LemmaSubSession, str]:
+def build_docq_subagent(
+    model: Any = None,
+    *,
+    retries: int = 1,
+    include_semantic_tool: bool = True,
+) -> Agent[LemmaSubSession, str]:
     agent = Agent(
         model=model,
         deps_type=LemmaSubSession,
         output_type=str,
         name="docq-lemma-subagent",
-        system_prompt=LEMMA_SUBAGENT_SYSTEM_PROMPT,
+        system_prompt=_lemma_subagent_prompt(include_semantic_tool=include_semantic_tool),
         retries=retries,
     )
 
@@ -80,18 +101,20 @@ def build_docq_subagent(model: Any = None, *, retries: int = 1) -> Agent[LemmaSu
     def explore_toc(ctx: RunContext[LemmaSubSession], path: list[str] | None = None) -> dict[str, Any]:
         return ctx.deps.toc_explorer.explore(path or [])
 
-    @agent.tool
-    def semantic_doc_search(
-        ctx: RunContext[LemmaSubSession],
-        query: str,
-        k: int = 5,
-    ) -> dict[str, Any]:
-        if ctx.deps.semantic_search is None:
-            raise ModelRetry("Semantic search is not configured for this session.")
-        if k < 1:
-            raise ModelRetry("k must be >= 1")
-        results = ctx.deps.semantic_search.search(query=query, k=k)
-        return {"query": query, "k": k, "results": results}
+    if include_semantic_tool:
+
+        @agent.tool
+        def semantic_doc_search(
+            ctx: RunContext[LemmaSubSession],
+            query: str,
+            k: int = 5,
+        ) -> dict[str, Any]:
+            if ctx.deps.semantic_search is None:
+                raise ModelRetry("Semantic search is not configured for this session.")
+            if k < 1:
+                raise ModelRetry("k must be >= 1")
+            results = ctx.deps.semantic_search.search(query=query, k=k)
+            return {"query": query, "k": k, "results": results}
 
     @agent.tool
     def read_source_file(
@@ -193,7 +216,7 @@ def build_docq_subagent(model: Any = None, *, retries: int = 1) -> Agent[LemmaSu
 class DocqAgentSession:
     client: Any
     source_path: Path
-    env: str
+    env: str | None
     doc_manager: DocumentManager
     toc_explorer: TocExplorer
     semantic_search: SemanticDocSearchClient | None = None
@@ -203,6 +226,7 @@ class DocqAgentSession:
     logger: Callable[[str], None] | None = None
     subagent_model: Any = None
     subagent_retries: int = 1
+    include_semantic_tool: bool = True
     pending_lemmas: dict[str, PendingLemma] = field(default_factory=dict)
 
     @classmethod
@@ -211,7 +235,7 @@ class DocqAgentSession:
         client: Any,
         source_path: str | Path,
         *,
-        env: str,
+        env: str | None = None,
         timeout: float = 60.0,
         connect: bool = True,
         logger: Callable[[str], None] | None = None,
@@ -221,6 +245,7 @@ class DocqAgentSession:
         max_tool_calls: int = 120,
         subagent_model: Any = None,
         subagent_retries: int = 1,
+        include_semantic_tool: bool = True,
     ) -> "DocqAgentSession":
         if connect:
             client.connect()
@@ -248,6 +273,7 @@ class DocqAgentSession:
             logger=logger,
             subagent_model=subagent_model,
             subagent_retries=subagent_retries,
+            include_semantic_tool=include_semantic_tool,
         )
         session.doc_manager.mutation_validator = session._validate_mutation_in_fresh_session
         return session
@@ -364,7 +390,11 @@ class DocqAgentSession:
             toc_explorer=self.toc_explorer,
             semantic_search=self.semantic_search,
         )
-        subagent = build_docq_subagent(model=self.subagent_model, retries=self.subagent_retries)
+        subagent = build_docq_subagent(
+            model=self.subagent_model,
+            retries=self.subagent_retries,
+            include_semantic_tool=self.include_semantic_tool,
+        )
         limits = None
         if remaining is not None:
             limits = UsageLimits(tool_calls_limit=remaining)
@@ -572,7 +602,12 @@ class DocqAgentSession:
         return out
 
 
-def build_docq_agent(model: Any = None, *, retries: int = 2) -> Agent[DocqAgentSession, str]:
+def build_docq_agent(
+    model: Any = None,
+    *,
+    retries: int = 2,
+    include_semantic_tool: bool = True,
+) -> Agent[DocqAgentSession, str]:
     agent = Agent(
         model=model,
         deps_type=DocqAgentSession,
@@ -586,18 +621,20 @@ def build_docq_agent(model: Any = None, *, retries: int = 2) -> Agent[DocqAgentS
     def explore_toc(ctx: RunContext[DocqAgentSession], path: list[str] | None = None) -> dict[str, Any]:
         return ctx.deps.toc_explorer.explore(path or [])
 
-    @agent.tool
-    def semantic_doc_search(
-        ctx: RunContext[DocqAgentSession],
-        query: str,
-        k: int = 5,
-    ) -> dict[str, Any]:
-        if ctx.deps.semantic_search is None:
-            raise ModelRetry("Semantic search is not configured for this session.")
-        if k < 1:
-            raise ModelRetry("k must be >= 1")
-        results = ctx.deps.semantic_search.search(query=query, k=k)
-        return {"query": query, "k": k, "results": results}
+    if include_semantic_tool:
+
+        @agent.tool
+        def semantic_doc_search(
+            ctx: RunContext[DocqAgentSession],
+            query: str,
+            k: int = 5,
+        ) -> dict[str, Any]:
+            if ctx.deps.semantic_search is None:
+                raise ModelRetry("Semantic search is not configured for this session.")
+            if k < 1:
+                raise ModelRetry("k must be >= 1")
+            results = ctx.deps.semantic_search.search(query=query, k=k)
+            return {"query": query, "k": k, "results": results}
 
     @agent.tool
     def read_source_file(
