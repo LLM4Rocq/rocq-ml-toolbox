@@ -176,15 +176,19 @@ TOC note:
 - Some env-level TOCs expose logical module paths without `.v` suffix (for example `mathcomp/boot/ssrbool`).
 - `read_source_file` now resolves both logical paths and `.v` paths automatically.
 - `--env` is optional if exactly one `<coq_lib>/*.toc.json` is present in the server image.
+- `--source` defaults to `examples/putnam-agent/putnam/mathcomp/putnam_1965_a5.v`.
+- DocQ sessions stage virtual files with server-managed `/tmp` paths (no host-path root override).
+- Real-time logs are enabled by default; use `--quiet` to disable.
+- Batch mode supports `-k/--num-agents` plus `--max-concurrency`.
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... \
 DOCQ_SEARCH_BASE_URL=http://127.0.0.1:9000 \
 python examples/putnam-agent/run_docq_agent_openrouter.py \
-  --source /home/rocq/.opam/4.14.2+flambda/lib/coq/user-contrib/MathComp/ssreflect/ssrbool.v \
-  --env coq-mathcomp \
+  -k 4 \
   --host 127.0.0.1 \
-  --port 5000
+  --port 5000 \
+  --max-requests 200
 ```
 
 Optional semantic search env vars:
@@ -192,13 +196,13 @@ Optional semantic search env vars:
 - `DOCQ_SEARCH_BASE_URL` (required to enable `semantic_doc_search`)
 - `DOCQ_SEARCH_ROUTE` (default: `/search`)
 - `DOCQ_SEARCH_API_KEY` (optional bearer token)
+- `--max-requests` controls pydantic-ai `request_limit` (default: `200`).
 
 If retrieval is not available yet and you want to hide that tool entirely:
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... \
 python examples/putnam-agent/run_docq_agent_openrouter.py \
-  --source /path/to/file.v \
   --host 127.0.0.1 \
   --port 5000 \
   --disable-semantic-tool

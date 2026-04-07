@@ -18,6 +18,7 @@ from agent.doc_manager import DocumentManager  # noqa: E402
 from agent.docq_agent import (  # noqa: E402
     DocqAgentSession,
     LemmaSubSession,
+    _rebuild_branch_with_import,
     build_docq_agent,
     build_docq_subagent,
 )
@@ -29,6 +30,7 @@ class FakeClient:
         self.connected = False
         self.run_calls: list[tuple[int, str]] = []
         self.state_calls: list[tuple[str, int, int]] = []
+        self.tmp_file_calls: list[dict[str, Any]] = []
         self._next_state_id = 1
 
     def connect(self) -> None:
@@ -41,6 +43,7 @@ class FakeClient:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             if content is not None:
                 handle.write(content)
+        self.tmp_file_calls.append({"content": content, "root": root, "path": path})
         return path
 
     def get_state_at_pos(self, path: str, line: int, character: int, timeout: float | None = None) -> State:
@@ -101,7 +104,14 @@ class FakeClient:
             "file_index": {},
         }
 
-    def read_file(self, path: str, *, offset: int = 0, max_chars: int = 20000) -> dict[str, Any]:
+    def read_file(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        max_chars: int = 20000,
+        path_mode: str | None = None,
+    ) -> dict[str, Any]:
         content = Path(path).read_text(encoding="utf-8")
         chunk = content[offset : offset + max_chars]
         next_offset = offset + len(chunk)
@@ -120,6 +130,7 @@ class FakeLogicalPathClient(FakeClient):
         super().__init__()
         self.memory_files: dict[str, str] = {
             "mathcomp/boot/ssrbool.v": "Lemma eqxx : forall b : bool, b == b.\nProof.\nAdmitted.\n",
+            "theories/Sets/Finite_sets.v": "Lemma finite_sets_demo : True.\nProof.\nexact I.\nQed.\n",
         }
 
     def access_libraries(
@@ -171,7 +182,14 @@ class FakeLogicalPathClient(FakeClient):
             "file_index": {},
         }
 
-    def read_file(self, path: str, *, offset: int = 0, max_chars: int = 20000) -> dict[str, Any]:
+    def read_file(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        max_chars: int = 20000,
+        path_mode: str | None = None,
+    ) -> dict[str, Any]:
         if path not in self.memory_files:
             raise RuntimeError(f"not found: {path}")
         content = self.memory_files[path]
@@ -185,6 +203,25 @@ class FakeLogicalPathClient(FakeClient):
             "eof": next_offset >= len(content),
             "total_chars": len(content),
         }
+
+
+class FakeDenyTmpReadClient(FakeClient):
+    def read_file(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        max_chars: int = 20000,
+        path_mode: str | None = None,
+    ) -> dict[str, Any]:
+        if path.startswith("/tmp/tmp"):
+            raise RuntimeError(f"read denied: {path}")
+        return super().read_file(path, offset=offset, max_chars=max_chars, path_mode=path_mode)
+
+
+class FakeMissingRefClient(FakeClient):
+    def run(self, state: State, cmd: str, timeout: float | None = None) -> State:
+        raise RuntimeError("Coq: The reference lia was not found in the current environment.")
 
 
 def _source_file(tmp_path: Path) -> Path:
@@ -246,6 +283,39 @@ def test_document_manager_auto_branch_on_mutation_from_older_doc(tmp_path: Path)
     assert manager.head_doc_id == 2
 
 
+def test_document_manager_uses_server_tmp_root(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    manager.add_import(libname="MathComp", source="ssreflect")
+    assert client.tmp_file_calls
+    assert all(call.get("root") is None for call in client.tmp_file_calls)
+
+
+def test_run_tac_rejects_top_level_vernac(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    out = manager.run_tac(state_index=0, tactic="Lemma rogue : True.")
+    assert out["ok"] is False
+    assert "top-level vernac" in out["error"]
+
+
+def test_run_tac_rejects_markdown_wrapped_tactic(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    out = manager.run_tac(state_index=0, tactic="`intro n.`")
+    assert out["ok"] is False
+    assert "markdown-wrapped tactic" in out["error"]
+
+
+def test_run_tac_missing_reference_includes_hint(tmp_path: Path):
+    client = FakeMissingRefClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    out = manager.run_tac(state_index=0, tactic="lia.")
+    assert out["ok"] is False
+    assert "not found in the current environment" in out["error"]
+    assert "add_import" in str(out.get("hint", ""))
+
+
 def test_document_manager_checkout_and_list_docs(tmp_path: Path):
     client = FakeClient()
     manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
@@ -276,6 +346,85 @@ def test_document_manager_remove_import(tmp_path: Path):
 
     with pytest.raises(ValueError, match="Import not found"):
         manager.remove_import(libname="MathComp", source="ssreflect")
+
+
+def test_document_manager_add_import_accepts_full_statement_in_source(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    out = manager.add_import(
+        libname="ignored",
+        source="From mathcomp.fingroup Require Import perm.",
+    )
+    assert out["ok"] is True
+    workspace = manager.show_workspace()
+    assert "From mathcomp.fingroup Require Import perm." in workspace["content"]
+
+
+def test_document_manager_prepare_intermediate_lemma_rejects_full_declaration(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    prep = session.prepare_intermediate_lemma(
+        lemma_type="Lemma helper_full_decl : True.",
+        lemma_name="helper_full_decl",
+    )
+    assert prep["ok"] is False
+    assert "expected proposition only" in str(prep.get("error", ""))
+    assert len(session.list_pending_intermediate_lemmas()) == 0
+
+
+def test_document_manager_prepare_intermediate_lemma_rejects_markdown_backticks(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    before_calls = len(client.tmp_file_calls)
+    prep = session.prepare_intermediate_lemma(
+        lemma_type="`forall n : nat, n > 0 -> n >= 1`",
+        lemma_name="helper_backtick",
+    )
+    assert prep["ok"] is False
+    assert "markdown backticks" in str(prep.get("error", ""))
+    assert len(session.list_pending_intermediate_lemmas()) == 0
+    # No transient branch should be created on immediate format rejection.
+    assert len(client.tmp_file_calls) == before_calls
+
+
+def test_document_manager_prepare_intermediate_lemma_rejects_unicode_logic(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    before_calls = len(client.tmp_file_calls)
+    prep = session.prepare_intermediate_lemma(
+        lemma_type="∀ n : nat, n > 0 -> n >= 1",
+        lemma_name="helper_unicode",
+    )
+    assert prep["ok"] is False
+    assert "Unicode logical symbols" in str(prep.get("error", ""))
+    assert len(session.list_pending_intermediate_lemmas()) == 0
+    assert len(client.tmp_file_calls) == before_calls
+
+
+def test_document_manager_doc_id_for_source_path(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    head_source = manager.sessions[manager.head_doc_id].source_path
+    assert manager.doc_id_for_source_path(str(head_source)) == manager.head_doc_id
+    assert manager.doc_id_for_source_path("/tmp/does-not-exist.v") is None
 
 
 def test_document_manager_mutation_validator_rejects_and_rolls_back(tmp_path: Path):
@@ -428,8 +577,37 @@ def test_docq_shared_budget_blocks_subagent(tmp_path: Path):
     assert "budget" in out["error"].lower()
 
 
-def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
+def test_docq_request_budget_blocks_subagent(tmp_path: Path):
     client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+        max_requests=1,
+    )
+    session.usage.requests = 1
+    out = session.add_intermediate_lemma(lemma_type="True")
+    assert out["ok"] is False
+    assert "request budget" in out["error"].lower()
+
+
+def test_docq_session_accepts_configured_request_limit(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+        max_requests=321,
+    )
+    assert session.usage_limits.request_limit == 321
+
+
+def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
+    client = FakeDenyTmpReadClient()
     session = DocqAgentSession.from_source(
         client,
         _source_file(tmp_path),
@@ -484,6 +662,32 @@ def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
     assert "run_tac" in payload
     assert "require_import" in payload
     assert "abort" in payload
+
+
+def test_docq_subagent_require_import_applies_to_workspace_and_replays(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    branch = session.doc_manager.sessions[session.doc_manager.head_doc_id]
+    deps = LemmaSubSession(
+        branch=branch,
+        client=session.client,
+        toc_explorer=session.toc_explorer,
+    )
+    agent = build_docq_subagent(model=TestModel(call_tools=["run_tac", "require_import", "show_workspace"]))
+    result = agent.run_sync("Run tactic then require import and show workspace.", deps=deps)
+    payload = json.loads(result.output)
+
+    assert payload["run_tac"]["ok"] is True
+    assert payload["require_import"]["ok"] is True
+    assert payload["require_import"]["applied_to_workspace"] is True
+    assert "From Stdlib Require Import List." in payload["show_workspace"]["content"]
+    assert len(payload["show_workspace"]["states"]) >= 2
 
 
 def test_docq_subagent_can_disable_semantic_tool():
@@ -579,6 +783,15 @@ def test_toc_explorer_handles_logical_source_paths():
     assert entry["suggested_read_path"] == "mathcomp/boot/ssrbool.v"
 
 
+def test_toc_explorer_accepts_slash_joined_segments():
+    client = FakeLogicalPathClient()
+    explorer = TocExplorer(client=client, env="coq-mathcomp")
+    out = explorer.explore(["mathcomp/boot"])
+    assert out["ok"] is True
+    assert out["path"] == ["mathcomp", "boot"]
+    assert out["requested_path"] == ["mathcomp/boot"]
+
+
 def test_read_source_via_client_resolves_missing_v_suffix():
     client = FakeLogicalPathClient()
     out = read_source_via_client(client, "mathcomp/boot/ssrbool")
@@ -586,3 +799,26 @@ def test_read_source_via_client_resolves_missing_v_suffix():
     assert out["requested_path"] == "mathcomp/boot/ssrbool"
     assert out["resolved_path"] == "mathcomp/boot/ssrbool.v"
     assert "eqxx" in out["content"]
+
+
+def test_read_source_via_client_rejects_unknown_non_toc_path():
+    client = FakeLogicalPathClient()
+    with pytest.raises(ValueError, match="Unable to resolve source path") as exc:
+        read_source_via_client(client, "/_std_lib/Sets/Finite_sets.v")
+    msg = str(exc.value)
+    assert "explore_toc" in msg
+    assert "Absolute filesystem paths are not supported" in msg
+
+
+def test_rebuild_branch_with_import_replays_existing_tactics(tmp_path: Path):
+    client = FakeClient()
+    source = _source_file(tmp_path)
+    manager = DocumentManager(client, source, timeout=5.0)
+    branch = manager.sessions[manager.head_doc_id]
+    first = branch.run_tac(0, "idtac.")
+    assert first["ok"] is True
+    rebuilt, info = _rebuild_branch_with_import(branch, libname="MathComp", source="ssreflect")
+    assert info["added"] is True
+    assert info["replayed_tactics"] == 1
+    assert "From MathComp Require Import ssreflect." in rebuilt.source_content
+    assert rebuilt.latest_state_index == 1
