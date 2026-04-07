@@ -462,6 +462,10 @@ class ScalableDocqRunner:
                     handle.write(line)
                     handle.write("\n")
 
+        def _task_record_echo(message: str) -> None:
+            _task_record(message)
+            self._log(message)
+
         def _flush_captured_messages() -> None:
             nonlocal run_message_cursor, global_message_index
             if captured_messages is None:
@@ -479,8 +483,8 @@ class ScalableDocqRunner:
         async def _event_stream_handler(_run_ctx: Any, stream: Any) -> None:
             nonlocal event_cursor, model_call_index
             model_call_index += 1
-            _task_record(
-                "model call start("
+            _task_record_echo(
+                f"{task_label} | model call start("
                 f"index={model_call_index}, "
                 f"run_step={getattr(_run_ctx, 'run_step', None)}, "
                 f"requests={getattr(getattr(_run_ctx, 'usage', None), 'requests', None)}, "
@@ -496,8 +500,8 @@ class ScalableDocqRunner:
                 )
                 event_cursor += 1
                 _flush_captured_messages()
-            _task_record(
-                "model call end("
+            _task_record_echo(
+                f"{task_label} | model call end("
                 f"index={model_call_index}, "
                 f"run_step={getattr(_run_ctx, 'run_step', None)}, "
                 f"requests={getattr(getattr(_run_ctx, 'usage', None), 'requests', None)}, "
@@ -560,14 +564,14 @@ class ScalableDocqRunner:
                                 "Exceeded maximum context compression rounds "
                                 f"({self.max_compressions_per_task}). Last error: {exc}"
                             ) from exc
-                        _task_record(
-                            "context compression triggered "
+                        _task_record_echo(
+                            f"{task_label} | context compression triggered "
                             f"(round={compression_rounds}, threshold={self.threshold_compression})"
                         )
                         compression_start_requests = int(getattr(session.usage, "requests", 0) or 0)
                         compression_start_input = int(getattr(session.usage, "input_tokens", 0) or 0)
-                        _task_record(
-                            "compression summary call start("
+                        _task_record_echo(
+                            f"{task_label} | compression summary call start("
                             f"round={compression_rounds}, "
                             f"requests={compression_start_requests}, "
                             f"input_tokens={compression_start_input})"
@@ -580,8 +584,8 @@ class ScalableDocqRunner:
                         )
                         compression_end_requests = int(getattr(session.usage, "requests", 0) or 0)
                         compression_end_input = int(getattr(session.usage, "input_tokens", 0) or 0)
-                        _task_record(
-                            "compression summary call end("
+                        _task_record_echo(
+                            f"{task_label} | compression summary call end("
                             f"round={compression_rounds}, "
                             f"requests={compression_end_requests}, "
                             f"input_tokens={compression_end_input}, "
@@ -611,8 +615,9 @@ class ScalableDocqRunner:
                         event_cursor += 1
                         current_prompt = self._resume_prompt(task.prompt, summary)
                         current_history = None
-                        _task_record(
-                            f"context compressed and resumed with prompt+summary (round={compression_rounds})"
+                        _task_record_echo(
+                            f"{task_label} | context compressed and resumed with prompt+summary "
+                            f"(round={compression_rounds})"
                         )
                         continue
 
