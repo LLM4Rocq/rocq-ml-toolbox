@@ -137,7 +137,9 @@ OPENROUTER_API_KEY=sk-or-... \
 python examples/putnam-agent/run_batch_kimi_openrouter.py \
   -k 6 \
   --host 127.0.0.1 \
-  --port 5000
+  --port 5000 \
+  --temperature 1.0 \
+  --top-p 0.95
 ```
 
 Notes:
@@ -157,6 +159,7 @@ It supports both forward and inverse edits on the virtual workspace:
 It also exposes explicit branch/DAG controls:
 
 - `list_docs`, `checkout_doc`, `show_doc`
+- `completion_status` (quick check that current head proof is actually closed)
 - all state and mutation tools accept optional `doc_id`
 - phased intermediate lemma flow:
   - `prepare_intermediate_lemma`
@@ -168,8 +171,12 @@ Validation and dependency propagation notes:
 
 - intermediate-lemma sub-agent can declare imports with `require_import(libname, source)`;
   the main agent applies these imports before registering the proved lemma.
+- each sub-agent proof run uses its own fresh server client (when available), so its RPC id
+  stream is isolated from the main-agent client.
 - every document mutation (`add/remove import`, `add/remove lemma`) is revalidated in a fresh
   server session; rejected mutations are rolled back automatically.
+- completion is enforced at output validation: pending intermediate lemmas are forbidden, and the
+  head proof must have `latest_goals_count == 0`; otherwise the model is retried with an actionable hint.
 
 TOC note:
 
@@ -180,6 +187,16 @@ TOC note:
 - DocQ sessions stage virtual files with server-managed `/tmp` paths (no host-path root override).
 - Real-time logs are enabled by default; use `--quiet` to disable.
 - Batch mode supports `-k/--num-agents` plus `--max-concurrency`.
+- By default, each run exports artifacts under
+  `examples/putnam-agent/interactive_test/docq_batch_YYYYmmdd_HHMMSS/`:
+  - `task.log` (runtime trace),
+  - `all_messages.jsonl` / `new_messages.jsonl` (incremental pydantic-ai message history, one JSON object per line),
+  - `events.jsonl` (incremental model/tool event stream, one JSON object per line),
+  - `docs/doc_<id>.v`, `final_doc.v`, and `final_doc_materialized.v` (virtual document DAG snapshots + materialized head proof),
+  - `summary.json` (usage, pending lemmas, head state/goals).
+- Disable artifact export with `--no-artifacts`.
+- Note: the DocQ workflow currently does not auto-run a global Putnam `safe_verify/end` step; check
+  `summary.json` (`head_proof_finished`, `head_goals_count`) to see whether the current head workspace is closed.
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... \
@@ -188,8 +205,19 @@ python examples/putnam-agent/run_docq_agent_openrouter.py \
   -k 4 \
   --host 127.0.0.1 \
   --port 5000 \
-  --max-requests 200
+  --temperature 1.0 \
+  --top-p 0.95 \
+  --max-requests 200 \
+  --threshold-compression 100000 \
+  --artifacts-dir examples/putnam-agent/interactive_test/docq_demo_run
 ```
+
+Context compaction:
+
+- `--threshold-compression` (default `100000`) enables automatic context compression.
+- When cumulative token usage crosses the threshold during a task, the runner asks the model for a high-signal task handoff summary, then resumes with:
+  `main task prompt + summary` (history reset).
+- Set `--threshold-compression 0` to disable this behavior.
 
 Optional semantic search env vars:
 
