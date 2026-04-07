@@ -109,16 +109,17 @@ class PytanqueExtended(Pytanque):
         *,
         offset: int = 0,
         max_chars: int = 20000,
+        path_mode: str | None = None,
     ) -> dict[str, Any]:
+        payload = {
+            "path": str(path),
+            "offset": offset,
+            "max_chars": max_chars,
+        }
+        if path_mode is not None:
+            payload["path_mode"] = path_mode
         result = self._ensure_dict(
-            self._post_json(
-                "read_file",
-                {
-                    "path": str(path),
-                    "offset": offset,
-                    "max_chars": max_chars,
-                },
-            ),
+            self._post_json("read_file", payload),
             endpoint="/read_file",
         )
         content = result.get("content")

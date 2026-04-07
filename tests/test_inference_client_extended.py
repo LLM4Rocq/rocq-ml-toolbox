@@ -62,7 +62,10 @@ def test_client_access_libraries_without_env(monkeypatch):
 
 
 def test_client_read_write_file_validation(monkeypatch):
+    calls: list[tuple[str, dict[str, Any]]] = []
+
     def fake_post(url: str, json: dict[str, Any]):
+        calls.append((url, json))
         if url.endswith("/read_file"):
             return _FakeResponse(
                 {
@@ -83,8 +86,14 @@ def test_client_read_write_file_validation(monkeypatch):
 
     out = client.read_file("/tmp/a.v", offset=0, max_chars=10)
     assert out["content"] == "abc"
+    out2 = client.read_file("theories/Demo.v", offset=0, max_chars=10, path_mode="coq_lib_relative")
+    assert out2["content"] == "abc"
     wrote = client.write_file("/tmp/a.v", content="xyz", offset=0, truncate=True)
     assert wrote["bytes_written"] == 3
+    first_read_payload = calls[0][1]
+    second_read_payload = calls[1][1]
+    assert "path_mode" not in first_read_payload
+    assert second_read_payload["path_mode"] == "coq_lib_relative"
 
 
 def test_client_raises_on_invalid_response(monkeypatch):
