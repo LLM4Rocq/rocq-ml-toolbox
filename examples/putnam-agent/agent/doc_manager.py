@@ -21,12 +21,37 @@ FORBIDDEN_TACTIC_PREFIX_RE = re.compile(
     r"Hypothesis|Variable|Context|Qed|Admitted|Defined|Abort)\b"
 )
 PLACEHOLDER_TACTIC_RE = re.compile(r"\b(admit|admitted)\b", re.IGNORECASE)
+SHELVING_TACTIC_RE = re.compile(r"\b(shelve_unifiable|unshelve|shelve)\b", re.IGNORECASE)
 MutationValidator = Callable[[int, str], tuple[bool, str | None]]
 UNICODE_LOGIC_TOKENS = ("∀", "∃", "→", "↔", "⇒", "⇔", "∧", "∨", "≤", "≥", "≠", "¬")
 MISSING_IN_ENV_RE = re.compile(
     r"(reference|variable)\s+.+\s+was not found in the current environment",
     re.IGNORECASE,
 )
+
+
+class LemmaSubsessionProbeError(ValueError):
+    def __init__(
+        self,
+        *,
+        lemma_name: str,
+        lemma_statement: str,
+        probe_tactic: str,
+        probe_check: dict[str, Any],
+    ):
+        self.lemma_name = lemma_name
+        self.lemma_statement = lemma_statement
+        self.probe_tactic = probe_tactic
+        self.probe_check = dict(probe_check)
+        probe_error = str(probe_check.get("error", "unknown error"))
+        probe_hint = probe_check.get("hint")
+        message = (
+            f"Lemma declaration/type-check failed for `{lemma_name}`. "
+            f"Probe tactic `{probe_tactic}` failed with: {probe_error}"
+        )
+        if probe_hint:
+            message += f" Hint: {probe_hint}"
+        super().__init__(message)
 
 
 def _join_lines(lines: list[str], *, trailing_newline: bool = True) -> str:
@@ -73,6 +98,45 @@ def _tactic_error_hint(error: str) -> str | None:
             "Do not guess import roots; derive `libname`/`source` from TOC entries."
         )
     return None
+
+
+def _normalize_error_for_loop_guard(error: str) -> str:
+    text = re.sub(r"\s+", " ", error.strip().lower())
+    if len(text) > 500:
+        return text[:500]
+    return text
+
+
+def _is_missing_name_error(error: str, *, name: str) -> bool:
+    pattern = re.compile(
+        rf"(reference|variable)\s+{re.escape(name)}\s+was not found in the current environment",
+        re.IGNORECASE,
+    )
+    return bool(pattern.search(error))
+
+
+def _format_state_feedback(state: Any) -> list[dict[str, Any]]:
+    raw_feedback = getattr(state, "feedback", None)
+    if not isinstance(raw_feedback, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in raw_feedback:
+        level: Any = None
+        message: Any = None
+        if isinstance(entry, tuple | list) and len(entry) >= 2:
+            level, message = entry[0], entry[1]
+        elif isinstance(entry, dict):
+            level = entry.get("level")
+            message = entry.get("message")
+        else:
+            message = str(entry)
+        out.append(
+            {
+                "level": int(level) if isinstance(level, int) else level,
+                "message": str(message) if message is not None else "",
+            }
+        )
+    return out
 
 
 def _normalize_import_parts(libname: str, source: str) -> tuple[str, str]:
@@ -205,6 +269,8 @@ class BranchSession:
     timeout: float
     nodes: list[StateNode] = field(default_factory=list)
     logger: Callable[[str], None] | None = None
+    _last_failure_signature: tuple[int, str] | None = None
+    _last_failure_count: int = 0
 
     def _log(self, message: str) -> None:
         if self.logger:
@@ -290,11 +356,47 @@ class BranchSession:
                 "source_state_index": state_index,
                 "error": error,
             }
+        if SHELVING_TACTIC_RE.search(tactic):
+            error = (
+                "run_tac rejected shelving tactics (`shelve`/`Unshelve`). "
+                "These can hide unresolved obligations and produce non-replayable proofs. "
+                "Use real proof steps or branch/lemma tools instead."
+            )
+            self._log(f"run_tac rejected(doc_id={self.doc_id}, state={state_index}): {error}")
+            return {
+                "ok": False,
+                "doc_id": self.doc_id,
+                "source_state_index": state_index,
+                "error": error,
+            }
         try:
             new_state = self.client.run(node.state, tactic, timeout=self.timeout)
         except Exception as exc:
             error = str(exc)
             hint = _tactic_error_hint(error)
+            signature = (state_index, _normalize_error_for_loop_guard(error))
+            if signature == self._last_failure_signature:
+                self._last_failure_count += 1
+            else:
+                self._last_failure_signature = signature
+                self._last_failure_count = 1
+            loop_guard_triggered = self._last_failure_count >= 3
+            if loop_guard_triggered:
+                loop_hint = (
+                    f"Loop guard: repeated the same failure on state {state_index} "
+                    f"({self._last_failure_count} times). "
+                    "Re-anchor with `get_goals`/`list_states`/`read_workspace_source`, then "
+                    "change strategy (import missing symbols, branch from another state, or "
+                    "introduce/prove an intermediate lemma). Do not retry the same tactic pattern."
+                )
+                if hint:
+                    hint = f"{hint} {loop_hint}"
+                else:
+                    hint = loop_hint
+                self._log(
+                    f"run_tac loop_guard(doc_id={self.doc_id}, state={state_index}): "
+                    f"repeat_count={self._last_failure_count}"
+                )
             self._log(f"run_tac failed(doc_id={self.doc_id}, state={state_index}): {error}")
             if hint:
                 self._log(f"run_tac hint(doc_id={self.doc_id}, state={state_index}): {hint}")
@@ -306,12 +408,18 @@ class BranchSession:
             }
             if hint:
                 out["hint"] = hint
+            if loop_guard_triggered:
+                out["loop_guard_triggered"] = True
+                out["failure_repeat_count"] = self._last_failure_count
             return out
 
         new_idx = len(self.nodes)
         self.nodes.append(StateNode(index=new_idx, parent_index=state_index, tactic=tactic, state=new_state))
+        self._last_failure_signature = None
+        self._last_failure_count = 0
         goals = self.client.goals(new_state, timeout=self.timeout)
         pretty_goals = [getattr(goal, "pp", None) or getattr(goal, "ty", "") for goal in goals]
+        feedback = _format_state_feedback(new_state)
         self._log(f"run_tac ok(doc_id={self.doc_id}) -> new_state_index={new_idx}, goals={len(pretty_goals)}")
         return {
             "ok": True,
@@ -319,6 +427,8 @@ class BranchSession:
             "source_state_index": state_index,
             "new_state_index": new_idx,
             "goals": pretty_goals,
+            "feedback": feedback,
+            "feedback_count": len(feedback),
         }
 
     def _tactics_path(self, state_index: int) -> list[str]:
@@ -789,9 +899,45 @@ class DocumentManager:
             content=probe_content,
             purpose="lemma_typecheck_probe",
         )
-        probe_check = probe_session.run_tac(0, f"pose proof ({lemma_name}).")
+        probe_tactic = f"pose proof ({lemma_name})."
+        probe_check = probe_session.run_tac(0, probe_tactic)
         if not probe_check.get("ok", False):
-            raise ValueError(f"Lemma declaration/type-check failed: {probe_check.get('error', 'unknown error')}")
+            probe_error = str(probe_check.get("error", ""))
+            if _is_missing_name_error(probe_error, name=lemma_name):
+                statement_probe_tactic = f"assert ({normalized_type})."
+                statement_probe = probe_session.run_tac(0, statement_probe_tactic)
+                probe_check = dict(probe_check)
+                probe_check["statement_probe_tactic"] = statement_probe_tactic
+                if not statement_probe.get("ok", False):
+                    probe_check["statement_probe_error"] = statement_probe.get("error")
+                    probe_check["statement_probe_hint"] = statement_probe.get("hint")
+                message = (
+                    "Internal probe note: `prepare_intermediate_lemma` runs "
+                    f"`{probe_tactic}` to verify the newly declared lemma is in scope. "
+                    f"That probe failed with: {probe_error}. "
+                    "This usually indicates the lemma declaration did not register as expected "
+                    "(statement parsing/typechecking/scope issue), not a missing library import."
+                )
+                if not statement_probe.get("ok", False):
+                    message += (
+                        f" Secondary statement probe `{statement_probe_tactic}` failed with: "
+                        f"{statement_probe.get('error')}. "
+                    )
+                    st_hint = statement_probe.get("hint")
+                    if st_hint:
+                        message += f"Hint: {st_hint}"
+                else:
+                    message += (
+                        " Secondary statement probe succeeded, so focus on why the named lemma "
+                        "was not registered in the probe context."
+                    )
+                probe_check["hint"] = message
+            raise LemmaSubsessionProbeError(
+                lemma_name=lemma_name,
+                lemma_statement=lemma_statement,
+                probe_tactic=probe_tactic,
+                probe_check=probe_check,
+            )
 
         layout = parse_last_target_layout(base_content)
         lines = list(layout.prefix_lines)

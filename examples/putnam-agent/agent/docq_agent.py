@@ -11,7 +11,13 @@ from pydantic_ai import Agent, ModelRetry, RunContext, capture_run_messages
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.usage import RunUsage, UsageLimits
 
-from .doc_manager import BranchSession, DocumentManager, StateNode, parse_last_target_layout
+from .doc_manager import (
+    BranchSession,
+    DocumentManager,
+    LemmaSubsessionProbeError,
+    StateNode,
+    parse_last_target_layout,
+)
 from .docstring_tools import SemanticDocSearchClient
 from .library_tools import TocExplorer, read_source_via_client
 
@@ -897,6 +903,14 @@ class DocqAgentSession:
     def _is_total_tokens_limit_error(exc: Exception) -> bool:
         return "total_tokens_limit" in str(exc)
 
+    @staticmethod
+    def _absolute_shared_limit(*, remaining: int | None, used: int) -> int | None:
+        if remaining is None:
+            return None
+        rem = max(0, int(remaining))
+        base = max(0, int(used))
+        return base + rem
+
     def _subagent_attempt_usage_limits(
         self,
         *,
@@ -906,9 +920,17 @@ class DocqAgentSession:
         # Compression threshold is enforced from per-request context size
         # (`req_input_tokens`) in the subagent event handler.
         total_tokens_limit = getattr(self.usage_limits, "total_tokens_limit", None)
+        used_requests = int(getattr(self.usage, "requests", 0) or 0)
+        used_tool_calls = int(getattr(self.usage, "tool_calls", 0) or 0)
         return UsageLimits(
-            request_limit=remaining_requests,
-            tool_calls_limit=remaining_tool_calls,
+            request_limit=self._absolute_shared_limit(
+                remaining=remaining_requests,
+                used=used_requests,
+            ),
+            tool_calls_limit=self._absolute_shared_limit(
+                remaining=remaining_tool_calls,
+                used=used_tool_calls,
+            ),
             input_tokens_limit=getattr(self.usage_limits, "input_tokens_limit", None),
             output_tokens_limit=getattr(self.usage_limits, "output_tokens_limit", None),
             total_tokens_limit=total_tokens_limit,
@@ -1039,9 +1061,17 @@ class DocqAgentSession:
             f"{history_excerpt}"
         )
         compressor = self._get_subagent_compression_agent()
+        used_requests = int(getattr(self.usage, "requests", 0) or 0)
+        used_tool_calls = int(getattr(self.usage, "tool_calls", 0) or 0)
         summary_limits = UsageLimits(
-            request_limit=remaining_requests,
-            tool_calls_limit=remaining_tool_calls,
+            request_limit=self._absolute_shared_limit(
+                remaining=remaining_requests,
+                used=used_requests,
+            ),
+            tool_calls_limit=self._absolute_shared_limit(
+                remaining=remaining_tool_calls,
+                used=used_tool_calls,
+            ),
             total_tokens_limit=None,
         )
         with capture_run_messages() as compression_messages:
@@ -1426,8 +1456,34 @@ class DocqAgentSession:
                 lemma_type=lemma_type,
                 doc_id=doc_id,
             )
+        except LemmaSubsessionProbeError as exc:
+            probe_check = dict(exc.probe_check)
+            out = {
+                "ok": False,
+                "phase": "prepare",
+                "lemma_name": name,
+                "error": str(exc),
+                "probe_error": probe_check.get("error"),
+                "probe_hint": probe_check.get("hint"),
+                "probe_doc_id": probe_check.get("doc_id"),
+                "probe_state_index": probe_check.get("source_state_index"),
+                "probe_tactic": exc.probe_tactic,
+                "lemma_statement": exc.lemma_statement,
+            }
+            if "statement_probe_tactic" in probe_check:
+                out["statement_probe_tactic"] = probe_check.get("statement_probe_tactic")
+            if "statement_probe_error" in probe_check:
+                out["statement_probe_error"] = probe_check.get("statement_probe_error")
+            if "statement_probe_hint" in probe_check:
+                out["statement_probe_hint"] = probe_check.get("statement_probe_hint")
+            return out
         except Exception as exc:
-            return {"ok": False, "phase": "prepare", "lemma_name": name, "error": f"Lemma declaration/type-check failed: {exc}"}
+            return {
+                "ok": False,
+                "phase": "prepare",
+                "lemma_name": name,
+                "error": f"Lemma declaration/type-check failed: {exc}",
+            }
 
         self.pending_lemmas[name] = PendingLemma(
             base_doc_id=base_doc_id,
