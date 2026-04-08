@@ -32,13 +32,13 @@ from agent import (  # noqa: E402
 from rocq_ml_toolbox.inference.client import PytanqueExtended  # noqa: E402
 
 DEFAULT_SOURCE = THIS_DIR / "putnam" / "mathcomp" / "putnam_1965_a5.v"
-DEFAULT_MODEL = "openai/gpt-5.3-codex"
+DEFAULT_MODEL = "moonshotai/kimi-k2.5"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_TOP_P = 0.95
 DEFAULT_MIN_P = 0.01
 DEFAULT_REPEAT_PENALTY = 1.0
-DEFAULT_THRESHOLD_COMPRESSION = 100_000
+DEFAULT_THRESHOLD_COMPRESSION = 130_000
 DEFAULT_PROMPT = (
     "Inspect the workspace and propose one useful intermediate lemma candidate, "
     "then attempt proving it."
@@ -345,6 +345,34 @@ class ScalableDocqRunner:
         if not text:
             return False
         return ("Exceeded maximum retries" in text) and ("output validation" in text)
+
+    @staticmethod
+    def _output_validation_status_marker(status: dict[str, Any] | None) -> tuple[int, int, int] | None:
+        if not status or not isinstance(status, dict):
+            return None
+        if status.get("error"):
+            return None
+        doc_id = status.get("doc_id", status.get("head_doc_id"))
+        state = status.get("latest_state_index")
+        goals = status.get("latest_goals_count")
+        if doc_id is None or state is None or goals is None:
+            return None
+        try:
+            return int(doc_id), int(state), int(goals)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_progress_log_message(message: str) -> bool:
+        progress_markers = (
+            "run_tac ok(",
+            "prove_intermediate_lemma ok(",
+            "subagent done(",
+            "add_intermediate_lemma done:",
+            "add_import ok(",
+            "remove_import ok(",
+        )
+        return any(marker in message for marker in progress_markers)
 
     @staticmethod
     def _resume_prompt_after_output_validation(
@@ -821,11 +849,16 @@ class ScalableDocqRunner:
         output: str | None = None
         error: str | None = None
         tb_text: str | None = None
+        progress_events_count = 0
+        last_recovery_progress_events = 0
 
         def session_logger(message: str, *, label: str = task_label) -> None:
+            nonlocal progress_events_count
             line = f"{label} | {message}"
             _task_record(line)
             self._log(line)
+            if self._is_progress_log_message(message):
+                progress_events_count += 1
         try:
             session = DocqAgentSession.from_source(
                 client=client,
@@ -863,6 +896,9 @@ class ScalableDocqRunner:
             current_prompt = task.prompt
             current_history: Sequence[Any] | None = None
             output_validation_recoveries = 0
+            last_output_validation_marker: tuple[int, int, int] | None = None
+            progress_events_count = 0
+            last_recovery_progress_events = 0
             while True:
                 limits = self._make_attempt_usage_limits(session)
                 with capture_run_messages() as run_messages:
@@ -881,17 +917,37 @@ class ScalableDocqRunner:
                         _flush_captured_messages()
                         if not self._is_output_validation_retry_exhaustion(exc):
                             raise
+                        status_snapshot: dict[str, Any]
+                        try:
+                            status_snapshot = session.completion_status()
+                        except Exception as status_exc:
+                            status_snapshot = {"error": str(status_exc)}
+                        marker = self._output_validation_status_marker(status_snapshot)
+                        if progress_events_count > last_recovery_progress_events:
+                            output_validation_recoveries = 0
+                            _task_record_echo(
+                                f"{task_label} | output validation recovery counter reset "
+                                f"(proof progress events: {last_recovery_progress_events} -> "
+                                f"{progress_events_count})"
+                            )
+                        if (
+                            marker is not None
+                            and last_output_validation_marker is not None
+                            and marker != last_output_validation_marker
+                        ):
+                            output_validation_recoveries = 0
+                            _task_record_echo(
+                                f"{task_label} | output validation recovery counter reset "
+                                f"(progress detected: {last_output_validation_marker} -> {marker})"
+                            )
                         output_validation_recoveries += 1
                         if output_validation_recoveries > self.max_output_validation_recoveries:
                             raise RuntimeError(
                                 "Exceeded output-validation recovery attempts "
                                 f"({self.max_output_validation_recoveries}). Last error: {exc}"
                             ) from exc
-                        status_snapshot: dict[str, Any]
-                        try:
-                            status_snapshot = session.completion_status()
-                        except Exception as status_exc:
-                            status_snapshot = {"error": str(status_exc)}
+                        last_output_validation_marker = marker
+                        last_recovery_progress_events = progress_events_count
                         _task_record_echo(
                             f"{task_label} | output validation recovery triggered "
                             f"(attempt={output_validation_recoveries}/{self.max_output_validation_recoveries})"
@@ -926,6 +982,11 @@ class ScalableDocqRunner:
                         continue
                     except (UsageLimitExceeded, _CompressionRequested) as exc:
                         _flush_captured_messages()
+                        # A non-output-validation continuation path has happened; restart
+                        # consecutive-recovery accounting from scratch.
+                        output_validation_recoveries = 0
+                        last_output_validation_marker = None
+                        last_recovery_progress_events = progress_events_count
                         compression_reason = "limit"
                         compression_req_input: int | None = None
                         if isinstance(exc, _CompressionRequested):
