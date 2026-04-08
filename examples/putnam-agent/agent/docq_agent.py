@@ -1593,12 +1593,27 @@ class DocqAgentSession:
             }
 
         self.pending_lemmas.pop(lemma_name, None)
+        continue_doc_id = int(reg.get("doc_id", base_doc_id))
+        continue_state_index = self.doc_manager.sessions[continue_doc_id].latest_state_index
         reg["phase"] = "prove"
         reg["lemma_name"] = lemma_name
+        reg["lemma_statement"] = f"{lemma_name} : {pending.lemma_type}"
         reg["proof_script"] = proof_script
+        reg["continue_doc_id"] = continue_doc_id
+        reg["continue_state_index"] = continue_state_index
+        reg["available_state_indexes"] = self.doc_manager.list_states(doc_id=continue_doc_id)
+        reg["main_agent_feedback"] = (
+            f"Subagent successfully proved the intermediate lemma `{lemma_name} : {pending.lemma_type}`. "
+            f"It is now added to doc_id={continue_doc_id} and available in scope. "
+            f"Continue from state {continue_state_index} and leverage this lemma in the main proof."
+        )
         if applied_imports:
             reg["applied_imports"] = applied_imports
-        self._log(f"prove_intermediate_lemma ok(lemma_name={lemma_name}, doc_id={reg.get('doc_id')})")
+        self._log(
+            f"prove_intermediate_lemma ok(lemma_name={lemma_name}, doc_id={continue_doc_id}, "
+            f"continue_state_index={continue_state_index}, "
+            f"replayed_tactics={reg.get('replayed_tactics', 0)})"
+        )
         return reg
 
     def drop_pending_intermediate_lemma(self, *, lemma_name: str) -> dict[str, Any]:

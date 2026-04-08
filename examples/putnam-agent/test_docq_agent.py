@@ -457,6 +457,19 @@ def test_document_manager_auto_branch_on_mutation_from_older_doc(tmp_path: Path)
     assert manager.head_doc_id == 2
 
 
+def test_document_manager_add_import_replays_latest_tactics(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    first = manager.run_tac(state_index=0, tactic="idtac.")
+    assert first["ok"] is True
+
+    added = manager.add_import(libname="MathComp", source="ssreflect")
+    assert added["ok"] is True
+    assert added["replayed_tactics"] == 1
+    assert manager.list_states(doc_id=added["doc_id"]) == [0, 1]
+    assert manager.sessions[added["doc_id"]].nodes[1].tactic == "idtac."
+
+
 def test_document_manager_uses_server_tmp_root(tmp_path: Path):
     client = FakeClient()
     manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
@@ -540,11 +553,15 @@ def test_document_manager_checkout_and_list_docs(tmp_path: Path):
 def test_document_manager_remove_import(tmp_path: Path):
     client = FakeClient()
     manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    first = manager.run_tac(state_index=0, tactic="idtac.")
+    assert first["ok"] is True
     added = manager.add_import(libname="MathComp", source="ssreflect")
     assert added["ok"] is True
 
-    removed = manager.remove_import(libname="MathComp", source="ssreflect")
+    removed = manager.remove_import(libname="MathComp", source="ssreflect", doc_id=added["doc_id"])
     assert removed["ok"] is True
+    assert removed["replayed_tactics"] == 1
+    assert manager.list_states(doc_id=removed["doc_id"]) == [0, 1]
     workspace = manager.show_workspace()
     assert "From MathComp Require Import ssreflect." not in workspace["content"]
 
@@ -755,6 +772,7 @@ def test_docq_prepare_prove_drop_intermediate_lemma(tmp_path: Path):
     proved = session.prove_intermediate_lemma(lemma_name="helper_x")
     assert proved["ok"] is True
     assert proved["lemma_name"] == "helper_x"
+    assert "Subagent successfully proved the intermediate lemma" in proved["main_agent_feedback"]
     assert session.list_pending_intermediate_lemmas() == []
 
     prep2 = session.prepare_intermediate_lemma(lemma_type="False", lemma_name="helper_bad")
@@ -849,6 +867,34 @@ def test_docq_prove_intermediate_applies_required_imports(tmp_path: Path):
     assert proved["applied_imports"][0]["source"] == "ssreflect"
     workspace = session.doc_manager.show_workspace()
     assert "From MathComp Require Import ssreflect." in workspace["content"]
+
+
+def test_docq_prove_intermediate_replays_main_states_after_registration(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    first = session.doc_manager.run_tac(state_index=0, tactic="idtac.")
+    assert first["ok"] is True
+
+    prep = session.prepare_intermediate_lemma(lemma_type="True", lemma_name="helper_replay")
+    assert prep["ok"] is True
+
+    session.run_lemma_subagent = lambda **kwargs: {"ok": True, "proof_script": "exact I."}  # type: ignore[method-assign]
+    proved = session.prove_intermediate_lemma(lemma_name="helper_replay")
+    assert proved["ok"] is True
+    assert proved["replayed_tactics"] == 1
+    assert proved["continue_state_index"] == 1
+    assert proved["available_state_indexes"] == [0, 1]
+    assert "helper_replay : True" in proved["main_agent_feedback"]
+    latest_doc_id = int(proved["doc_id"])
+    assert session.doc_manager.sessions[latest_doc_id].nodes[1].tactic == "idtac."
+    workspace = session.doc_manager.show_workspace(doc_id=latest_doc_id)
+    assert "Lemma helper_replay : True." in workspace["content"]
 
 
 def test_document_manager_remove_intermediate_lemma(tmp_path: Path):

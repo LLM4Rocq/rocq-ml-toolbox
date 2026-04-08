@@ -588,7 +588,42 @@ class DocumentManager:
                 return doc_id
         return None
 
-    def _create_mutation(self, *, base_doc_id: int, label: str, content: str) -> dict[str, Any]:
+    def _rollback_mutation(self, *, new_doc_id: int, base_doc_id: int) -> None:
+        self.nodes.pop(new_doc_id, None)
+        self.sessions.pop(new_doc_id, None)
+        self._next_doc_id = new_doc_id
+        self.head_doc_id = base_doc_id
+
+    def _replay_latest_tactics(self, *, source_doc_id: int, target_doc_id: int, label: str) -> int:
+        source_session = self.sessions[source_doc_id]
+        target_session = self.sessions[target_doc_id]
+        tactics = source_session._tactics_path(source_session.latest_state_index)
+        if not tactics:
+            return 0
+
+        replayed = 0
+        state_index = 0
+        for tactic in tactics:
+            out = target_session.run_tac(state_index=state_index, tactic=tactic)
+            if not out.get("ok", False):
+                error = out.get("error", "unknown error")
+                raise ValueError(
+                    f"Replay failed for mutation `{label}` on tactic #{replayed + 1} "
+                    f"(source_doc_id={source_doc_id}, target_doc_id={target_doc_id}, "
+                    f"source_state={state_index}): {error}"
+                )
+            state_index = int(out["new_state_index"])
+            replayed += 1
+        return replayed
+
+    def _create_mutation(
+        self,
+        *,
+        base_doc_id: int,
+        label: str,
+        content: str,
+        replay_from_doc_id: int | None = None,
+    ) -> dict[str, Any]:
         branched = base_doc_id != self.head_doc_id
         new_doc_id = self._next_doc_id
         self._next_doc_id += 1
@@ -600,22 +635,37 @@ class DocumentManager:
         )
         self.sessions[new_doc_id] = self._new_branch_session(doc_id=new_doc_id, content=content)
         self.head_doc_id = new_doc_id
+        replayed_tactics = 0
         if self.mutation_validator is not None:
             ok, error = self.mutation_validator(new_doc_id, label)
             if not ok:
-                self.nodes.pop(new_doc_id, None)
-                self.sessions.pop(new_doc_id, None)
-                self._next_doc_id = new_doc_id
-                self.head_doc_id = base_doc_id
+                self._rollback_mutation(new_doc_id=new_doc_id, base_doc_id=base_doc_id)
                 detail = error or "fresh-session validation failed"
                 raise ValueError(f"Mutation `{label}` rejected by fresh-session validation: {detail}")
-        self._log(f"new doc node: {new_doc_id} (from {base_doc_id}) label={label!r} branched={branched}")
+        if replay_from_doc_id is not None:
+            try:
+                replayed_tactics = self._replay_latest_tactics(
+                    source_doc_id=replay_from_doc_id,
+                    target_doc_id=new_doc_id,
+                    label=label,
+                )
+            except Exception as exc:
+                self._rollback_mutation(new_doc_id=new_doc_id, base_doc_id=base_doc_id)
+                raise ValueError(
+                    f"Mutation `{label}` failed while replaying prior tactics from doc_id="
+                    f"{replay_from_doc_id}: {exc}"
+                ) from exc
+        self._log(
+            f"new doc node: {new_doc_id} (from {base_doc_id}) label={label!r} "
+            f"branched={branched} replayed_tactics={replayed_tactics}"
+        )
         return {
             "ok": True,
             "doc_id": new_doc_id,
             "base_doc_id": base_doc_id,
             "branched": branched,
             "head_doc_id": self.head_doc_id,
+            "replayed_tactics": replayed_tactics,
         }
 
     def list_states(self, *, doc_id: int | None = None) -> list[int]:
@@ -836,9 +886,13 @@ class DocumentManager:
             base_doc_id=resolved_doc_id,
             label=f"add_import:{libname}.{source}",
             content=new_content,
+            replay_from_doc_id=resolved_doc_id,
         )
         result["statement"] = statement
-        self._log(f"add_import ok(doc_id={result['doc_id']}, statement={statement!r})")
+        self._log(
+            f"add_import ok(doc_id={result['doc_id']}, statement={statement!r}, "
+            f"replayed_tactics={result.get('replayed_tactics', 0)})"
+        )
         return result
 
     def remove_import(self, *, libname: str, source: str, doc_id: int | None = None) -> dict[str, Any]:
@@ -866,9 +920,13 @@ class DocumentManager:
             base_doc_id=resolved_doc_id,
             label=f"remove_import:{libname}.{source}",
             content=new_content,
+            replay_from_doc_id=resolved_doc_id,
         )
         result["removed_statement"] = removed
-        self._log(f"remove_import ok(doc_id={result['doc_id']}, statement={removed!r})")
+        self._log(
+            f"remove_import ok(doc_id={result['doc_id']}, statement={removed!r}, "
+            f"replayed_tactics={result.get('replayed_tactics', 0)})"
+        )
         return result
 
     def next_lemma_name(self) -> str:
@@ -987,6 +1045,7 @@ class DocumentManager:
             base_doc_id=base_doc_id,
             label=f"add_lemma:{lemma_name}",
             content=content,
+            replay_from_doc_id=base_doc_id,
         )
         result["lemma_name"] = lemma_name
         return result
@@ -1011,6 +1070,7 @@ class DocumentManager:
             base_doc_id=resolved_doc_id,
             label=f"remove_lemma:{lemma_name}",
             content=new_content,
+            replay_from_doc_id=resolved_doc_id,
         )
         result["lemma_name"] = lemma_name
         result["removed_block"] = _join_lines(removed_lines, trailing_newline=False)
