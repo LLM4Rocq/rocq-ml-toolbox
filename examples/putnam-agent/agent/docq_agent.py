@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic_ai import Agent, ModelRetry, RunContext
+from pydantic_ai import Agent, ModelRetry, RunContext, capture_run_messages
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.usage import RunUsage, UsageLimits
 
@@ -24,6 +25,10 @@ DOCQ_SYSTEM_PROMPT = (
     "- Use `completion_status(doc_id?)` before finishing; do not end while `latest_goals_count > 0`.\n"
     "- Use `list_docs` and `checkout_doc` to navigate document branches.\n"
     "- Use `run_tac` from any known state index (optionally scoped by `doc_id`).\n"
+    "- State graph semantics: every successful `run_tac` creates a new state node.\n"
+    "  You can roll back/branch by re-running `run_tac` from any previous `state_index`.\n"
+    "- `show_workspace` includes a `states` list with `state_index`/`parent_state_index` so rollback targets are visible.\n"
+    "  Use `list_states`/`show_workspace` before branching from older states.\n"
     "- Use ASCII Coq syntax in tool arguments: `forall`, `exists`, `->`, `/\\`, `\\/`, `<=`, `>=`.\n"
     "  Do NOT use Unicode logic symbols (`∀`, `∃`, `→`, `∧`, `∨`, `≤`, `≥`, ...).\n"
     "- For imports, use `add_import(libname, source, doc_id?)` and `remove_import(...)`.\n"
@@ -32,12 +37,27 @@ DOCQ_SYSTEM_PROMPT = (
     "  Example call: add_import(libname='mathcomp.fingroup', source='perm').\n"
     "- For helper statements, prefer phased tools:\n"
     "  `prepare_intermediate_lemma` -> `prove_intermediate_lemma` -> `drop_pending_intermediate_lemma`.\n"
+    "- You can pass lemma-proving guidance with `subagent_message` on "
+    "`prepare_intermediate_lemma` / `prove_intermediate_lemma` / `add_intermediate_lemma`.\n"
+    "  Use it for relevant imports, local-goal focus, and proof strategy.\n"
     "- Intermediate lemma format: `lemma_name` is only the identifier; `lemma_type` is only the proposition.\n"
     "  Do NOT include `Lemma name :` prefix nor `Proof.`/`Qed.` in `lemma_type`.\n"
     "  Example call: prepare_intermediate_lemma(lemma_name='helper_card', lemma_type='forall n : nat, n > 0 -> True').\n"
     "- Convenience path `add_intermediate_lemma` is still available.\n"
     "- If a helper lemma is problematic, call `remove_intermediate_lemma(lemma_name)`.\n"
-    "- If stuck on lemma proving, the sub-agent can abort and report why."
+    "- If stuck on lemma proving, the sub-agent can abort and report why.\n"
+    "Reasoning quality bar:\n"
+    "- Before proposing a proof step, inspect the actual current goal/hypotheses (`completion_status` + `get_goals`).\n"
+    "- Choose tactics based on goal shape and available hypotheses; do not guess missing identifiers.\n"
+    "- After any failure, explain the concrete blocker from the error and adapt the next step.\n"
+    "- Avoid repeating the same failing tactic pattern; if blocked, gather context, import needed libraries, "
+    "or reformulate with an intermediate lemma.\n"
+    "Reason-before-tool protocol:\n"
+    "- Before each tool call, first write a short rationale with exactly these labels:\n"
+    "  `Goal:` `Observation:` `Plan:` `Expected result:`\n"
+    "- Make the rationale specific to the current proof state; avoid generic text.\n"
+    "- If the last step failed, your next rationale must reference that concrete error and what changes now.\n"
+    "- Prefer deliberate, high-signal moves over rapid low-information tool spam."
 )
 
 LEMMA_SUBAGENT_SYSTEM_PROMPT = (
@@ -51,6 +71,20 @@ LEMMA_SUBAGENT_SYSTEM_PROMPT = (
     "Goal: finish with no remaining goals."
 )
 
+SUBAGENT_COMPRESSION_SYSTEM_PROMPT = (
+    "You compress a lemma-proof subagent run for continuation after context reset.\n"
+    "Return a faithful handoff in plain text.\n"
+    "Keep exact names for lemmas/imports/doc_id/state and provide concrete next proof steps.\n"
+    "Never invent solved goals, imported modules, or successful tactics."
+)
+
+
+class _CompressionRequested(Exception):
+    def __init__(self, *, reason: str, req_input_tokens: int | None = None):
+        super().__init__(reason)
+        self.reason = reason
+        self.req_input_tokens = req_input_tokens
+
 
 def _lemma_subagent_prompt(*, include_semantic_tool: bool) -> str:
     retrieval_line = "`explore_toc`, `semantic_doc_search`, `read_source_file`"
@@ -61,9 +95,24 @@ def _lemma_subagent_prompt(*, include_semantic_tool: bool) -> str:
         "Use tools:\n"
         f"- {retrieval_line}\n"
         "- For library reads, pass TOC-relative file paths exactly as returned by `explore_toc`.\n"
+        "- `read_source_file` is for library files only; do NOT pass workspace `/tmp/...` paths.\n"
+        "- For current proof file content, always use `read_workspace_source`.\n"
         "- `show_workspace`, `read_workspace_source`\n"
         "- `list_states`, `get_goals`, `run_tac`\n"
+        "- State graph semantics: each successful `run_tac` creates a new state.\n"
+        "  You may roll back/branch by invoking `run_tac` from any earlier `state_index`.\n"
+        "- `show_workspace` returns `states` (with `state_index` and `parent_state_index`) so rollback points are explicit.\n"
         "- Use ASCII Coq syntax in tool arguments (`forall`, `exists`, `->`, `/\\`, `\\/`, `<=`, `>=`).\n"
+        "- `run_tac` must be one short tactic step per call (single line, no pasted scripts).\n"
+        "- Never send multi-line tactics, `Proof.` blocks, or `Qed.`/`Admitted.`.\n"
+        "- Reason in a disciplined loop: inspect goals -> pick one justified tactic -> run it -> re-check goals.\n"
+        "- When a tactic fails, use the exact error to choose a different next step (do not blind-retry).\n"
+        "- Prefer mathematically meaningful progress over superficial/no-op tactics.\n"
+        "- Before each tool call, write a short rationale with labels: `Goal:` `Observation:` `Plan:` `Expected result:`.\n"
+        "- Rationale must mention the current local goal (or exact blocker) and why the chosen tool/tactic is next.\n"
+        "- If you receive an error, explicitly change strategy in the next rationale; do not repeat unchanged attempts.\n"
+        "- After each failure, immediately re-anchor with `get_goals` or `read_workspace_source`, then try one corrected step.\n"
+        "- Prefer standard Coq tactics unless ssreflect imports/tactics are explicitly available in the workspace.\n"
         "- `require_import(libname, source)` if the lemma proof needs a new import.\n"
         "- Import format: only atoms; do not pass full `From ... Require Import ...` commands.\n"
         "- Example call: require_import(libname='mathcomp.fingroup', source='perm').\n"
@@ -89,6 +138,7 @@ class PendingLemma:
     lemma_name: str
     lemma_type: str
     sub_branch: BranchSession
+    subagent_message: str | None = None
 
 
 class _LockedClientProxy:
@@ -295,6 +345,23 @@ def _read_source_error_payload(*, requested_path: str, error: str) -> dict[str, 
     }
 
 
+def _normalize_read_source_path(path: str | list[str] | None) -> str | None:
+    if path is None:
+        return None
+    if isinstance(path, list):
+        parts: list[str] = []
+        for item in path:
+            token = str(item).strip()
+            if not token:
+                continue
+            token = token.strip("/")
+            if token:
+                parts.append(token)
+        return "/".join(parts)
+    token = str(path).strip()
+    return token or None
+
+
 def build_docq_subagent(
     model: Any = None,
     *,
@@ -349,28 +416,37 @@ def build_docq_subagent(
     @agent.tool
     def read_source_file(
         ctx: RunContext[LemmaSubSession],
-        path: str | None = None,
+        path: str | list[str] | None = None,
         line: int | None = None,
         before: int = 20,
         after: int = 20,
     ) -> dict[str, Any]:
         source_path = str(ctx.deps.branch.source_path)
-        requested_path = source_path if path is None else str(path)
+        normalized_path = _normalize_read_source_path(path)
+        requested_path = source_path if normalized_path is None else normalized_path
+        path_for_log = "<workspace>" if normalized_path is None else requested_path
         _sub_log(
             ctx,
-            f"read_source_file(path={requested_path!r}, line={line}, before={before}, after={after})",
+            f"read_source_file(path={path_for_log!r}, line={line}, before={before}, after={after})",
         )
-        if path is None or requested_path == source_path:
-            payload = _render_content_window(
-                ctx.deps.branch.source_content,
-                line=line,
-                before=before,
-                after=after,
+        if normalized_path is None or requested_path == source_path:
+            payload = {
+                "ok": False,
+                "error": "Workspace path is not allowed in subagent read_source_file.",
+                "hint": (
+                    "Use `read_workspace_source` for workspace content. "
+                    "Use `read_source_file` only with TOC-relative library paths."
+                ),
+                "source_kind": "workspace_doc",
+            }
+            _sub_log(ctx, "read_source_file -> rejected (workspace path); use read_workspace_source")
+            return payload
+        if Path(requested_path).is_absolute():
+            payload = _read_source_error_payload(
+                requested_path=requested_path,
+                error="Absolute filesystem paths are not supported by this tool.",
             )
-            payload["requested_path"] = requested_path
-            payload["resolved_path"] = source_path
-            payload["ok"] = True
-            _sub_log(ctx, "read_source_file -> ok (workspace content)")
+            _sub_log(ctx, f"read_source_file -> failed: {payload['error']}")
             return payload
         try:
             payload = read_source_via_client(
@@ -393,7 +469,6 @@ def build_docq_subagent(
         _sub_log(ctx, "show_workspace()")
         out = {
             "doc_id": ctx.deps.branch.doc_id,
-            "source_path": str(ctx.deps.branch.source_path),
             "states": ctx.deps.branch.list_states(),
             "content": _line_numbered_from_text(ctx.deps.branch.source_content, start_line=1),
         }
@@ -416,7 +491,6 @@ def build_docq_subagent(
                 after=after,
             )
             payload["doc_id"] = ctx.deps.branch.doc_id
-            payload["source_path"] = str(ctx.deps.branch.source_path)
             payload["ok"] = True
             _sub_log(ctx, "read_workspace_source -> ok")
             return payload
@@ -436,6 +510,11 @@ def build_docq_subagent(
         state_index: int = 0,
         tactic: str = "idtac.",
     ) -> dict[str, Any]:
+        if "\n" in tactic or "\r" in tactic:
+            raise ModelRetry(
+                "run_tac expects one tactic step per call (single line). "
+                "Split scripts into multiple run_tac calls."
+            )
         try:
             return ctx.deps.branch.run_tac(state_index, tactic)
         except ValueError as exc:
@@ -497,8 +576,14 @@ class DocqAgentSession:
     logger: Callable[[str], None] | None = None
     subagent_model: Any = None
     subagent_retries: int = 1
+    subagent_threshold_compression: int = 100_000
+    subagent_max_compression_rounds: int = 6
     include_semantic_tool: bool = True
+    trace_message_callback: Callable[[str, Any], None] | None = None
+    trace_event_callback: Callable[[str, Any], None] | None = None
+    trace_request_callback: Callable[[str, Any], None] | None = None
     pending_lemmas: dict[str, PendingLemma] = field(default_factory=dict)
+    _subagent_compression_agent: Agent[Any, str] | None = field(default=None, init=False, repr=False)
 
     @classmethod
     def from_source(
@@ -517,7 +602,12 @@ class DocqAgentSession:
         max_requests: int | None = 200,
         subagent_model: Any = None,
         subagent_retries: int = 1,
+        threshold_compression: int = 100_000,
+        subagent_max_compression_rounds: int = 6,
         include_semantic_tool: bool = True,
+        trace_message_callback: Callable[[str, Any], None] | None = None,
+        trace_event_callback: Callable[[str, Any], None] | None = None,
+        trace_request_callback: Callable[[str, Any], None] | None = None,
     ) -> "DocqAgentSession":
         locked_client = _LockedClientProxy(client)
         if connect:
@@ -546,7 +636,12 @@ class DocqAgentSession:
             logger=logger,
             subagent_model=subagent_model,
             subagent_retries=subagent_retries,
+            subagent_threshold_compression=threshold_compression,
+            subagent_max_compression_rounds=subagent_max_compression_rounds,
             include_semantic_tool=include_semantic_tool,
+            trace_message_callback=trace_message_callback,
+            trace_event_callback=trace_event_callback,
+            trace_request_callback=trace_request_callback,
         )
         session.doc_manager.mutation_validator = session._validate_mutation_in_fresh_session
         return session
@@ -554,6 +649,34 @@ class DocqAgentSession:
     def _log(self, message: str) -> None:
         if self.logger:
             self.logger(message)
+
+    def _emit_trace_messages(self, source: str, messages: list[Any]) -> None:
+        cb = self.trace_message_callback
+        if cb is None:
+            return
+        for msg in messages:
+            try:
+                cb(source, msg)
+            except Exception:
+                return
+
+    def _emit_trace_event(self, source: str, event: Any) -> None:
+        cb = self.trace_event_callback
+        if cb is None:
+            return
+        try:
+            cb(source, event)
+        except Exception:
+            return
+
+    def _emit_trace_request(self, source: str, payload: Any) -> None:
+        cb = self.trace_request_callback
+        if cb is None:
+            return
+        try:
+            cb(source, payload)
+        except Exception:
+            return
 
     def _try_make_fresh_client(self) -> Any | None:
         base_client = getattr(self.client, "_inner_client", self.client)
@@ -610,6 +733,62 @@ class DocqAgentSession:
         finally:
             self._close_client_quietly(fresh)
 
+    def validate_final_qed(
+        self,
+        *,
+        doc_id: int | None = None,
+        state_index: int | None = None,
+    ) -> tuple[bool, str | None]:
+        try:
+            status = self.doc_manager.completion_status(doc_id=doc_id)
+        except Exception as exc:
+            return False, f"Unable to read completion status before final Qed check: {exc}"
+
+        resolved_doc_id = int(status.get("doc_id", self.doc_manager.head_doc_id))
+        latest_state = int(
+            status.get(
+                "latest_state_index",
+                self.doc_manager.sessions[resolved_doc_id].latest_state_index,
+            )
+        )
+        target_state = latest_state if state_index is None else int(state_index)
+        if not bool(status.get("latest_proof_finished", False)):
+            return False, "Head proof is not finished yet; cannot run final Qed check."
+
+        probe_client = self._try_make_fresh_client()
+        owns_probe_client = probe_client is not None
+        if probe_client is None:
+            probe_client = self.client
+        try:
+            node = self.doc_manager.nodes[resolved_doc_id]
+            branch = self.doc_manager.sessions[resolved_doc_id]
+            proof_script = branch.proof_script(target_state)
+            tactics = [line for line in proof_script.splitlines() if line.strip()]
+            layout = parse_last_target_layout(node.content)
+            tmp_path = probe_client.tmp_file(content=node.content)
+            state = probe_client.get_state_at_pos(
+                str(tmp_path),
+                layout.proof_line,
+                layout.proof_character,
+                timeout=self.timeout,
+            )
+            for tactic in tactics:
+                state = probe_client.run(state, tactic, timeout=self.timeout)
+            probe_client.run(state, "Qed.", timeout=self.timeout)
+            self._log(
+                f"final Qed check ok(doc_id={resolved_doc_id}, state_index={target_state}, "
+                f"replayed_tactics={len(tactics)})"
+            )
+            return True, None
+        except Exception as exc:
+            self._log(
+                f"final Qed check failed(doc_id={resolved_doc_id}, state_index={target_state}): {exc}"
+            )
+            return False, str(exc)
+        finally:
+            if owns_probe_client:
+                self._close_client_quietly(probe_client)
+
     @staticmethod
     def _normalize_required_imports(raw: Any) -> list[tuple[str, str]]:
         if not isinstance(raw, list):
@@ -654,6 +833,261 @@ class DocqAgentSession:
             return None
         return max(0, limit - self.usage.requests)
 
+    def remaining_input_tokens(self) -> int | None:
+        limit = self.usage_limits.input_tokens_limit
+        if limit is None:
+            return None
+        used = int(getattr(self.usage, "input_tokens", 0) or 0)
+        return max(0, int(limit) - used)
+
+    def remaining_output_tokens(self) -> int | None:
+        limit = self.usage_limits.output_tokens_limit
+        if limit is None:
+            return None
+        used = int(getattr(self.usage, "output_tokens", 0) or 0)
+        return max(0, int(limit) - used)
+
+    def remaining_total_tokens(self) -> int | None:
+        limit = self.usage_limits.total_tokens_limit
+        if limit is None:
+            return None
+        used = int(getattr(self.usage, "total_tokens", 0) or 0)
+        return max(0, int(limit) - used)
+
+    @staticmethod
+    def _extract_last_response_usage(run_ctx: Any) -> tuple[int, int, int, int] | None:
+        extracted = DocqAgentSession._extract_last_request_response(run_ctx)
+        if extracted is None:
+            return None
+        response_index, _request_msg, _response_msg, req_input, req_output, req_total = extracted
+        return response_index, req_input, req_output, req_total
+
+    @staticmethod
+    def _extract_last_request_response(
+        run_ctx: Any,
+    ) -> tuple[int, Any | None, Any, int, int, int] | None:
+        messages = getattr(run_ctx, "messages", None)
+        if not messages:
+            return None
+        return DocqAgentSession._extract_last_request_response_from_messages(messages)
+
+    @staticmethod
+    def _extract_last_request_response_from_messages(
+        messages: list[Any],
+    ) -> tuple[int, Any | None, Any, int, int, int] | None:
+        # In streamed runs the tail item may be a non-response entry; scan
+        # backwards to find the latest response with usage payload.
+        for response_index in range(len(messages) - 1, -1, -1):
+            response_msg = messages[response_index]
+            usage = getattr(response_msg, "usage", None)
+            if usage is None:
+                continue
+            has_values = getattr(usage, "has_values", None)
+            if callable(has_values) and not has_values():
+                continue
+            req_input = int(getattr(usage, "input_tokens", 0) or 0)
+            req_output = int(getattr(usage, "output_tokens", 0) or 0)
+            req_total_raw = getattr(usage, "total_tokens", None)
+            req_total = int(req_total_raw) if req_total_raw is not None else req_input + req_output
+            request_msg = messages[response_index - 1] if response_index > 0 else None
+            return response_index, request_msg, response_msg, req_input, req_output, req_total
+        return None
+
+    @staticmethod
+    def _is_total_tokens_limit_error(exc: Exception) -> bool:
+        return "total_tokens_limit" in str(exc)
+
+    def _subagent_attempt_usage_limits(
+        self,
+        *,
+        remaining_tool_calls: int | None,
+        remaining_requests: int | None,
+    ) -> UsageLimits:
+        # Compression threshold is enforced from per-request context size
+        # (`req_input_tokens`) in the subagent event handler.
+        total_tokens_limit = getattr(self.usage_limits, "total_tokens_limit", None)
+        return UsageLimits(
+            request_limit=remaining_requests,
+            tool_calls_limit=remaining_tool_calls,
+            input_tokens_limit=getattr(self.usage_limits, "input_tokens_limit", None),
+            output_tokens_limit=getattr(self.usage_limits, "output_tokens_limit", None),
+            total_tokens_limit=total_tokens_limit,
+        )
+
+    def _get_subagent_compression_agent(self) -> Agent[Any, str]:
+        if self._subagent_compression_agent is None:
+            if self.subagent_model is None:
+                raise RuntimeError("No subagent model configured for context compression.")
+            self._subagent_compression_agent = Agent(
+                model=self.subagent_model,
+                output_type=str,
+                system_prompt=SUBAGENT_COMPRESSION_SYSTEM_PROMPT,
+                retries=1,
+                name="docq-lemma-compressor",
+            )
+        return self._subagent_compression_agent
+
+    @staticmethod
+    def _resume_subagent_prompt(main_prompt: str, summary: str) -> str:
+        return (
+            f"{main_prompt.strip()}\n\n"
+            "Continuation Summary:\n"
+            f"{summary.strip()}\n\n"
+            "Continue proving the same lemma from this summary."
+        )
+
+    @staticmethod
+    def _jsonable(value: Any) -> Any:
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, dict):
+            return {str(k): DocqAgentSession._jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [DocqAgentSession._jsonable(v) for v in value]
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            try:
+                return DocqAgentSession._jsonable(model_dump(mode="json"))
+            except TypeError:
+                return DocqAgentSession._jsonable(model_dump())
+            except Exception:
+                pass
+        to_dict = getattr(value, "dict", None)
+        if callable(to_dict):
+            try:
+                return DocqAgentSession._jsonable(to_dict())
+            except Exception:
+                pass
+        return repr(value)
+
+    @staticmethod
+    def _history_excerpt(
+        message_history: list[Any],
+        *,
+        max_items: int = 20,
+        max_chars: int = 16_000,
+    ) -> str:
+        if not message_history:
+            return "(none)"
+        tail = list(message_history[-max_items:])
+        base_index = max(0, len(message_history) - len(tail))
+        lines: list[str] = []
+        for i, msg in enumerate(tail, start=base_index):
+            payload = DocqAgentSession._jsonable(msg)
+            lines.append(f"[{i}] {json.dumps(payload, ensure_ascii=False)}")
+        out = "\n".join(lines)
+        if len(out) > max_chars:
+            return out[:max_chars] + "\n... [truncated]"
+        return out
+
+    def _summarize_subagent_for_compression(
+        self,
+        *,
+        deps: LemmaSubSession,
+        main_prompt: str,
+        message_history: list[Any],
+        round_index: int,
+        remaining_tool_calls: int | None,
+        remaining_requests: int | None,
+    ) -> str:
+        latest_state = deps.branch.latest_state_index
+        snapshot: dict[str, Any] = {
+            "compression_round": round_index,
+            "doc_id": deps.branch.doc_id,
+            "latest_state_index": latest_state,
+            "required_imports": [
+                {"libname": libname, "source": source} for (libname, source) in deps.required_imports
+            ],
+        }
+        try:
+            goals = deps.branch.get_goals(latest_state).get("goals", [])
+            snapshot["latest_goals_count"] = len(goals)
+            preview_goals: list[str] = []
+            for g in goals[:3]:
+                preview = str(g)
+                if len(preview) > 1200:
+                    preview = preview[:1200] + " ..."
+                preview_goals.append(preview)
+            snapshot["latest_goals"] = preview_goals
+        except Exception as exc:
+            snapshot["goal_snapshot_error"] = str(exc)
+        try:
+            proof_lines = deps.branch.proof_script(latest_state).splitlines()
+            snapshot["proof_script_tail"] = [ln for ln in proof_lines[-20:] if ln.strip()]
+        except Exception as exc:
+            snapshot["proof_script_tail_error"] = str(exc)
+
+        history_excerpt = self._history_excerpt(message_history, max_items=22, max_chars=18_000)
+        prompt = (
+            "Summarize this failed/truncated lemma-proof run for immediate continuation.\n"
+            "Write EXACTLY these sections with these headers:\n"
+            "1) LEMMA OBJECTIVE\n"
+            "2) CURRENT PROOF STATUS\n"
+            "3) WORKING STEPS (confirmed tactics/imports)\n"
+            "4) FAILING STEPS (exact error snippets)\n"
+            "5) LOCAL GOAL (verbatim from snapshot)\n"
+            "6) NEXT STEPS (ordered, concrete, short)\n"
+            "Hard requirements:\n"
+            "- Keep exact doc_id/state indexes, lemma names, and import atoms.\n"
+            "- Do not claim completion unless goals are truly empty.\n"
+            "- LOCAL GOAL must include at least one unresolved goal if present.\n"
+            "- NEXT STEPS must begin with a re-anchor action (get_goals/list_states/read_workspace_source).\n"
+            "- Target 350-700 words.\n\n"
+            f"Original lemma-subagent prompt:\n{main_prompt}\n\n"
+            f"Current snapshot (JSON):\n{json.dumps(snapshot, ensure_ascii=False)}\n\n"
+            "Recent captured run messages (possibly truncated):\n"
+            f"{history_excerpt}"
+        )
+        compressor = self._get_subagent_compression_agent()
+        summary_limits = UsageLimits(
+            request_limit=remaining_requests,
+            tool_calls_limit=remaining_tool_calls,
+            total_tokens_limit=None,
+        )
+        with capture_run_messages() as compression_messages:
+            result = compressor.run_sync(
+                prompt,
+                message_history=None,
+                usage=self.usage,
+                usage_limits=summary_limits,
+            )
+        extracted = self._extract_last_request_response_from_messages(compression_messages)
+        if extracted is not None:
+            (
+                response_index,
+                request_message,
+                response_message,
+                req_input_tokens,
+                req_output_tokens,
+                req_total_tokens,
+            ) = extracted
+            self._emit_trace_request(
+                "subagent-compression",
+                {
+                    "doc_id": deps.branch.doc_id,
+                    "compression_round": round_index,
+                    "response_index": response_index,
+                    "req_input_tokens": req_input_tokens,
+                    "req_output_tokens": req_output_tokens,
+                    "req_total_tokens": req_total_tokens,
+                    "context_message_count": response_index,
+                    "context_messages": list(compression_messages)[:response_index],
+                    "request_message": request_message,
+                    "response_message": response_message,
+                },
+            )
+        else:
+            self._emit_trace_request(
+                "subagent-compression",
+                {
+                    "doc_id": deps.branch.doc_id,
+                    "compression_round": round_index,
+                    "request_prompt": prompt,
+                    "response_text": str(result.output),
+                },
+            )
+        return str(result.output).strip()
+
     def run_lemma_subagent(
         self,
         *,
@@ -662,6 +1096,9 @@ class DocqAgentSession:
     ) -> dict[str, Any]:
         remaining_tool_calls = self.remaining_tool_calls()
         remaining_requests = self.remaining_requests()
+        remaining_input_tokens = self.remaining_input_tokens()
+        remaining_output_tokens = self.remaining_output_tokens()
+        remaining_total_tokens = self.remaining_total_tokens()
         if remaining_tool_calls is not None and remaining_tool_calls <= 0:
             return {"ok": False, "error": "Tool-call budget exhausted before sub-agent run."}
         if remaining_requests is not None and remaining_requests <= 0:
@@ -669,7 +1106,14 @@ class DocqAgentSession:
         self._log(
             f"subagent start(doc_id={sub_branch.doc_id}, remaining_tool_calls="
             f"{remaining_tool_calls if remaining_tool_calls is not None else 'unbounded'}, "
-            f"remaining_requests={remaining_requests if remaining_requests is not None else 'unbounded'})"
+            f"remaining_requests={remaining_requests if remaining_requests is not None else 'unbounded'}, "
+            f"remaining_input_tokens={remaining_input_tokens if remaining_input_tokens is not None else 'unbounded'}, "
+            f"remaining_output_tokens={remaining_output_tokens if remaining_output_tokens is not None else 'unbounded'}, "
+            f"remaining_total_tokens={remaining_total_tokens if remaining_total_tokens is not None else 'unbounded'}, "
+            f"used_input_tokens={int(getattr(self.usage, 'input_tokens', 0) or 0)}, "
+            f"used_output_tokens={int(getattr(self.usage, 'output_tokens', 0) or 0)}, "
+            f"used_total_tokens={int(getattr(self.usage, 'total_tokens', 0) or 0)}, "
+            f"compression_threshold_tokens={self.subagent_threshold_compression if self.subagent_threshold_compression > 0 else 0})"
         )
         sub_client = self._try_make_fresh_client()
         owns_sub_client = sub_client is not None
@@ -695,23 +1139,206 @@ class DocqAgentSession:
             retries=self.subagent_retries,
             include_semantic_tool=self.include_semantic_tool,
         )
-        limits = None
-        if remaining_tool_calls is not None or remaining_requests is not None:
-            limits = UsageLimits(tool_calls_limit=remaining_tool_calls, request_limit=remaining_requests)
+        current_prompt = prompt
+        current_history: list[Any] | None = None
+        compression_rounds = 0
+        sub_model_call_index = 0
+        sub_last_logged_requests = int(getattr(self.usage, "requests", 0) or 0)
+        sub_last_logged_input_tokens = int(getattr(self.usage, "input_tokens", 0) or 0)
+        sub_last_logged_output_tokens = int(getattr(self.usage, "output_tokens", 0) or 0)
+        sub_last_logged_response_index = -1
+        sub_runctx_message_cursor = 0
+        latest_subagent_messages: list[Any] = []
 
+        def _flush_subagent_runctx_messages(run_ctx: Any) -> None:
+            nonlocal sub_runctx_message_cursor, latest_subagent_messages
+            cb = self.trace_message_callback
+            if cb is None:
+                return
+            messages = getattr(run_ctx, "messages", None)
+            if not messages:
+                return
+            latest_subagent_messages = list(messages)
+            while sub_runctx_message_cursor < len(messages):
+                try:
+                    cb("subagent", messages[sub_runctx_message_cursor])
+                except Exception:
+                    return
+                sub_runctx_message_cursor += 1
+
+        async def _sub_event_stream_handler(_run_ctx: Any, stream: Any) -> None:
+            nonlocal sub_model_call_index, sub_last_logged_requests
+            nonlocal sub_last_logged_input_tokens, sub_last_logged_output_tokens
+            nonlocal sub_last_logged_response_index
+            async for _event in stream:
+                self._emit_trace_event("subagent", _event)
+                _flush_subagent_runctx_messages(_run_ctx)
+            _flush_subagent_runctx_messages(_run_ctx)
+            usage = getattr(_run_ctx, "usage", None)
+            requests_now = int(getattr(usage, "requests", 0) or 0)
+            input_tokens_now = int(getattr(usage, "input_tokens", 0) or 0)
+            output_tokens_now = int(getattr(usage, "output_tokens", 0) or 0)
+            per_request = self._extract_last_request_response(_run_ctx)
+            if per_request is not None:
+                (
+                    response_index,
+                    request_message,
+                    response_message,
+                    req_input,
+                    req_output,
+                    req_total,
+                ) = per_request
+                if response_index > sub_last_logged_response_index:
+                    sub_model_call_index += 1
+                    self._log(
+                        f"subagent model call(doc_id={sub_branch.doc_id}, "
+                        f"index={sub_model_call_index}, "
+                        f"run_step={getattr(_run_ctx, 'run_step', None)}, "
+                        f"requests={requests_now}, "
+                        f"req_input_tokens={req_input}, "
+                        f"req_output_tokens={req_output}, "
+                        f"req_total_tokens={req_total}, "
+                        f"input_tokens={input_tokens_now}, "
+                        f"output_tokens={output_tokens_now})"
+                    )
+                    self._emit_trace_request(
+                        "subagent",
+                        {
+                            "doc_id": sub_branch.doc_id,
+                            "index": sub_model_call_index,
+                            "run_step": getattr(_run_ctx, "run_step", None),
+                            "requests": requests_now,
+                            "response_index": response_index,
+                            "req_input_tokens": req_input,
+                            "req_output_tokens": req_output,
+                            "req_total_tokens": req_total,
+                            "input_tokens": input_tokens_now,
+                            "output_tokens": output_tokens_now,
+                            "context_message_count": response_index,
+                            "context_messages": list(getattr(_run_ctx, "messages", []) or [])[:response_index],
+                            "request_message": request_message,
+                            "response_message": response_message,
+                        },
+                    )
+                    sub_last_logged_response_index = response_index
+                    sub_last_logged_requests = requests_now
+                    sub_last_logged_input_tokens = input_tokens_now
+                    sub_last_logged_output_tokens = output_tokens_now
+                    if (
+                        self.subagent_threshold_compression > 0
+                        and req_input > self.subagent_threshold_compression
+                    ):
+                        raise _CompressionRequested(
+                            reason="req_input_tokens_threshold",
+                            req_input_tokens=req_input,
+                        )
+                    return
+            if requests_now > sub_last_logged_requests:
+                delta_requests = requests_now - sub_last_logged_requests
+                delta_input_tokens = input_tokens_now - sub_last_logged_input_tokens
+                delta_output_tokens = output_tokens_now - sub_last_logged_output_tokens
+                if delta_requests == 1 and delta_input_tokens == 0 and delta_output_tokens == 0:
+                    # Ignore noisy intermediate stream callbacks; a proper
+                    # per-request log usually follows once usage is attached.
+                    return
+                self._log(
+                    f"subagent model call coalesced(doc_id={sub_branch.doc_id}, "
+                    f"run_step={getattr(_run_ctx, 'run_step', None)}, "
+                    f"requests={requests_now}, "
+                    f"delta_requests={delta_requests}, "
+                    f"delta_input_tokens={delta_input_tokens}, "
+                    f"delta_output_tokens={delta_output_tokens})"
+                )
+                sub_last_logged_requests = requests_now
+                sub_last_logged_input_tokens = input_tokens_now
+                sub_last_logged_output_tokens = output_tokens_now
         try:
-            _ = subagent.run_sync(
-                prompt,
-                deps=deps,
-                usage=self.usage,
-                usage_limits=limits,
-            )
-        except UsageLimitExceeded as exc:
-            self._log(f"subagent budget exceeded(doc_id={sub_branch.doc_id}): {exc}")
-            return {"ok": False, "error": f"Sub-agent budget exceeded: {exc}"}
-        except Exception as exc:
-            self._log(f"subagent failure(doc_id={sub_branch.doc_id}): {exc}")
-            return {"ok": False, "error": f"Sub-agent failure: {exc}"}
+            while True:
+                limits = self._subagent_attempt_usage_limits(
+                    remaining_tool_calls=remaining_tool_calls,
+                    remaining_requests=remaining_requests,
+                )
+                with capture_run_messages() as run_messages:
+                    sub_runctx_message_cursor = 0
+                    latest_subagent_messages = []
+                    try:
+                        _ = subagent.run_sync(
+                            current_prompt,
+                            deps=deps,
+                            message_history=current_history,
+                            usage=self.usage,
+                            usage_limits=limits,
+                            event_stream_handler=_sub_event_stream_handler,
+                        )
+                        break
+                    except (UsageLimitExceeded, _CompressionRequested) as exc:
+                        compression_reason = "limit"
+                        compression_req_input: int | None = None
+                        if isinstance(exc, _CompressionRequested):
+                            if self.subagent_threshold_compression <= 0:
+                                self._log(f"subagent failure(doc_id={sub_branch.doc_id}): {exc}")
+                                return {"ok": False, "error": f"Sub-agent failure: {exc}"}
+                            compression_reason = exc.reason
+                            compression_req_input = exc.req_input_tokens
+                        else:
+                            if (
+                                self.subagent_threshold_compression <= 0
+                                or not self._is_total_tokens_limit_error(exc)
+                            ):
+                                self._log(f"subagent budget exceeded(doc_id={sub_branch.doc_id}): {exc}")
+                                return {"ok": False, "error": f"Sub-agent budget exceeded: {exc}"}
+                            compression_reason = "total_tokens_limit"
+                        compression_rounds += 1
+                        if compression_rounds > self.subagent_max_compression_rounds:
+                            err = (
+                                "Sub-agent exceeded maximum compression rounds "
+                                f"({self.subagent_max_compression_rounds}). Last error: {exc}"
+                            )
+                            self._log(f"subagent compression failed(doc_id={sub_branch.doc_id}): {err}")
+                            return {"ok": False, "error": err}
+                        start_input = int(getattr(self.usage, "input_tokens", 0) or 0)
+                        start_total = int(getattr(self.usage, "total_tokens", 0) or 0)
+                        self._log(
+                            f"subagent compression triggered(doc_id={sub_branch.doc_id}, "
+                            f"round={compression_rounds}, threshold={self.subagent_threshold_compression}, "
+                            f"reason={compression_reason}, req_input_tokens={compression_req_input}, "
+                            f"input_tokens={start_input}, total_tokens={start_total})"
+                        )
+                        try:
+                            summary = self._summarize_subagent_for_compression(
+                                deps=deps,
+                                main_prompt=prompt,
+                                message_history=latest_subagent_messages or run_messages,
+                                round_index=compression_rounds,
+                                remaining_tool_calls=remaining_tool_calls,
+                                remaining_requests=remaining_requests,
+                            )
+                        except Exception as summary_exc:
+                            err = f"Sub-agent compression summarization failed: {summary_exc}"
+                            self._log(f"subagent compression failed(doc_id={sub_branch.doc_id}): {err}")
+                            return {"ok": False, "error": err}
+                        end_input = int(getattr(self.usage, "input_tokens", 0) or 0)
+                        end_total = int(getattr(self.usage, "total_tokens", 0) or 0)
+                        self._log(
+                            f"subagent compression summary done(doc_id={sub_branch.doc_id}, "
+                            f"round={compression_rounds}, input_tokens={end_input}, total_tokens={end_total}, "
+                            f"delta_input_tokens={end_input - start_input}, "
+                            f"delta_total_tokens={end_total - start_total})"
+                        )
+                        current_prompt = self._resume_subagent_prompt(prompt, summary)
+                        current_history = None
+                        sub_last_logged_requests = int(getattr(self.usage, "requests", 0) or 0)
+                        sub_last_logged_input_tokens = int(getattr(self.usage, "input_tokens", 0) or 0)
+                        sub_last_logged_output_tokens = int(getattr(self.usage, "output_tokens", 0) or 0)
+                        sub_last_logged_response_index = -1
+                        self._log(
+                            f"subagent context compressed and resumed with prompt+summary "
+                            f"(doc_id={sub_branch.doc_id}, round={compression_rounds})"
+                        )
+                        continue
+                    except Exception as exc:
+                        self._log(f"subagent failure(doc_id={sub_branch.doc_id}): {exc}")
+                        return {"ok": False, "error": f"Sub-agent failure: {exc}"}
         finally:
             if owns_sub_client:
                 self._close_client_quietly(sub_client)
@@ -742,17 +1369,20 @@ class DocqAgentSession:
         *,
         lemma_type: str,
         prompt: str | None = None,
+        subagent_message: str | None = None,
         lemma_name: str | None = None,
         doc_id: int | None = None,
     ) -> dict[str, Any]:
+        has_subagent_message = bool((subagent_message or prompt or "").strip())
         self._log(
             f"add_intermediate_lemma called(lemma_name={lemma_name!r}, doc_id={doc_id}, "
-            f"lemma_type={lemma_type!r})"
+            f"lemma_type={lemma_type!r}, has_subagent_message={has_subagent_message})"
         )
         prep = self.prepare_intermediate_lemma(
             lemma_type=lemma_type,
             lemma_name=lemma_name,
             doc_id=doc_id,
+            subagent_message=subagent_message,
         )
         if not prep.get("ok", False):
             self._log(f"add_intermediate_lemma prepare failed: {prep.get('error')}")
@@ -760,6 +1390,7 @@ class DocqAgentSession:
         proved = self.prove_intermediate_lemma(
             lemma_name=str(prep["lemma_name"]),
             prompt=prompt,
+            subagent_message=subagent_message,
         )
         if not proved.get("ok", False):
             proved["prepared"] = True
@@ -774,10 +1405,12 @@ class DocqAgentSession:
         lemma_type: str,
         lemma_name: str | None = None,
         doc_id: int | None = None,
+        subagent_message: str | None = None,
     ) -> dict[str, Any]:
+        clean_subagent_message = (subagent_message or "").strip() or None
         self._log(
             f"prepare_intermediate_lemma called(lemma_name={lemma_name!r}, doc_id={doc_id}, "
-            f"lemma_type={lemma_type!r})"
+            f"lemma_type={lemma_type!r}, has_subagent_message={bool(clean_subagent_message)})"
         )
         name = (lemma_name or "").strip()
         if not name:
@@ -801,6 +1434,7 @@ class DocqAgentSession:
             lemma_name=name,
             lemma_type=lemma_type,
             sub_branch=sub_branch,
+            subagent_message=clean_subagent_message,
         )
         self._log(
             f"prepare_intermediate_lemma ok(lemma_name={name}, base_doc_id={base_doc_id}, "
@@ -813,6 +1447,7 @@ class DocqAgentSession:
             "base_doc_id": base_doc_id,
             "sub_doc_id": sub_branch.doc_id,
             "sub_states": sub_branch.list_states(),
+            "has_subagent_message": bool(clean_subagent_message),
         }
 
     def prove_intermediate_lemma(
@@ -820,8 +1455,14 @@ class DocqAgentSession:
         *,
         lemma_name: str,
         prompt: str | None = None,
+        subagent_message: str | None = None,
     ) -> dict[str, Any]:
-        self._log(f"prove_intermediate_lemma called(lemma_name={lemma_name!r})")
+        clean_prompt = (prompt or "").strip() or None
+        clean_subagent_message = (subagent_message or "").strip() or None
+        self._log(
+            f"prove_intermediate_lemma called(lemma_name={lemma_name!r}, "
+            f"has_prompt={bool(clean_prompt)}, has_subagent_message={bool(clean_subagent_message)})"
+        )
         pending = self.pending_lemmas.get(lemma_name)
         if pending is None:
             return {
@@ -832,10 +1473,13 @@ class DocqAgentSession:
                 "pending_lemmas": sorted(self.pending_lemmas.keys()),
             }
 
-        sub_prompt = prompt or (
+        handoff = clean_subagent_message or clean_prompt or pending.subagent_message
+        sub_prompt = (
             f"Prove the intermediate lemma `{lemma_name}`. "
             "Use run_tac/list_states/get_goals. Call abort if impossible."
         )
+        if handoff:
+            sub_prompt += f"\n\nMain-agent handoff:\n{handoff}"
         sub_result = self.run_lemma_subagent(sub_branch=pending.sub_branch, prompt=sub_prompt)
         if not sub_result.get("ok"):
             self._log(
@@ -929,6 +1573,7 @@ class DocqAgentSession:
                     "base_doc_id": pending.base_doc_id,
                     "sub_doc_id": pending.sub_branch.doc_id,
                     "sub_state_count": len(pending.sub_branch.nodes),
+                    "has_subagent_message": bool(pending.subagent_message),
                 }
             )
         return out
@@ -978,13 +1623,20 @@ def build_docq_agent(
     @agent.tool
     def read_source_file(
         ctx: RunContext[DocqAgentSession],
-        path: str,
+        path: str | list[str],
         line: int | None = None,
         before: int = 20,
         after: int = 20,
     ) -> dict[str, Any]:
-        ctx.deps._log(f"read_source_file(path={path!r}, line={line}, before={before}, after={after})")
-        workspace_doc_id = ctx.deps.doc_manager.doc_id_for_source_path(path)
+        normalized_path = _normalize_read_source_path(path)
+        if normalized_path is None:
+            error = "Invalid empty path. Provide a TOC-relative path like `mathcomp/fingroup/perm.v`."
+            ctx.deps._log(f"read_source_file -> failed: {error}")
+            return _read_source_error_payload(requested_path=str(path), error=error)
+        ctx.deps._log(
+            f"read_source_file(path={normalized_path!r}, line={line}, before={before}, after={after})"
+        )
+        workspace_doc_id = ctx.deps.doc_manager.doc_id_for_source_path(normalized_path)
         if workspace_doc_id is not None:
             try:
                 out = ctx.deps.doc_manager.read_source(
@@ -993,7 +1645,7 @@ def build_docq_agent(
                     after=after,
                     doc_id=workspace_doc_id,
                 )
-                out["requested_path"] = path
+                out["requested_path"] = normalized_path
                 out["resolved_path"] = str(ctx.deps.doc_manager.sessions[workspace_doc_id].source_path)
                 out["ok"] = True
                 out["source_kind"] = "workspace_doc"
@@ -1005,11 +1657,11 @@ def build_docq_agent(
             except Exception as exc:
                 error = str(exc)
                 ctx.deps._log(f"read_source_file -> failed (workspace path): {error}")
-                return _read_source_error_payload(requested_path=path, error=error)
+                return _read_source_error_payload(requested_path=normalized_path, error=error)
         try:
             out = read_source_via_client(
                 ctx.deps.client,
-                path,
+                normalized_path,
                 line=line,
                 before=before,
                 after=after,
@@ -1020,7 +1672,7 @@ def build_docq_agent(
         except Exception as exc:
             error = str(exc)
             ctx.deps._log(f"read_source_file -> failed: {error}")
-            return _read_source_error_payload(requested_path=path, error=error)
+            return _read_source_error_payload(requested_path=normalized_path, error=error)
 
     @agent.tool
     def list_docs(ctx: RunContext[DocqAgentSession]) -> list[dict[str, Any]]:
@@ -1141,12 +1793,14 @@ def build_docq_agent(
         lemma_type: str,
         lemma_name: str | None = None,
         doc_id: int | None = None,
+        subagent_message: str | None = None,
     ) -> dict[str, Any]:
-        """Prepare helper lemma. Example: prepare_intermediate_lemma(lemma_name='helper_card', lemma_type='forall n : nat, n > 0 -> True')."""
+        """Prepare helper lemma and optionally store `subagent_message` guidance for the proving subagent."""
         return ctx.deps.prepare_intermediate_lemma(
             lemma_type=lemma_type,
             lemma_name=lemma_name,
             doc_id=doc_id,
+            subagent_message=subagent_message,
         )
 
     @agent.tool
@@ -1154,8 +1808,14 @@ def build_docq_agent(
         ctx: RunContext[DocqAgentSession],
         lemma_name: str,
         prompt: str | None = None,
+        subagent_message: str | None = None,
     ) -> dict[str, Any]:
-        return ctx.deps.prove_intermediate_lemma(lemma_name=lemma_name, prompt=prompt)
+        """Prove prepared helper lemma. Use `subagent_message` to pass import/goal/strategy hints to the subagent."""
+        return ctx.deps.prove_intermediate_lemma(
+            lemma_name=lemma_name,
+            prompt=prompt,
+            subagent_message=subagent_message,
+        )
 
     @agent.tool
     def drop_pending_intermediate_lemma(
@@ -1174,13 +1834,15 @@ def build_docq_agent(
         lemma_type: str,
         lemma_name: str | None = None,
         prompt: str | None = None,
+        subagent_message: str | None = None,
         doc_id: int | None = None,
     ) -> dict[str, Any]:
-        """Prepare+prove helper lemma. Example: add_intermediate_lemma(lemma_name='helper_card', lemma_type='forall n : nat, n > 0 -> True')."""
+        """Prepare+prove helper lemma. `subagent_message` is forwarded as a handoff to the proving subagent."""
         return ctx.deps.add_intermediate_lemma(
             lemma_type=lemma_type,
             lemma_name=lemma_name,
             prompt=prompt,
+            subagent_message=subagent_message,
             doc_id=doc_id,
         )
 
@@ -1225,6 +1887,16 @@ def build_docq_agent(
                 f"latest_goals_count={status.get('latest_goals_count')}. "
                 "Call `completion_status` then `get_goals` on the latest state and continue with `run_tac`. "
                 "If needed, inspect/branch with `list_states`, `show_workspace`, `list_docs`, `checkout_doc`."
+            )
+        ok, qed_error = ctx.deps.validate_final_qed(
+            doc_id=int(status.get("doc_id", ctx.deps.doc_manager.head_doc_id)),
+            state_index=int(status.get("latest_state_index", 0)),
+        )
+        if not ok:
+            raise ModelRetry(
+                "You cannot finish yet: explicit final `Qed.` replay check failed. "
+                f"Error: {qed_error}. "
+                "Re-anchor with `completion_status`/`get_goals`, then continue `run_tac` until a clean finish."
             )
         return output
 

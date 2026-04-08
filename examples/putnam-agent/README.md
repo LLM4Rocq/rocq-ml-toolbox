@@ -166,6 +166,7 @@ It also exposes explicit branch/DAG controls:
   - `prove_intermediate_lemma`
   - `drop_pending_intermediate_lemma`
   - `list_pending_intermediate_lemmas`
+  - optional `subagent_message` handoff on prepare/prove/add to pass import hints, local-goal focus, and proof strategy to the lemma sub-agent
 
 Validation and dependency propagation notes:
 
@@ -217,6 +218,7 @@ Context compaction:
 - `--threshold-compression` (default `100000`) enables automatic context compression.
 - When cumulative token usage crosses the threshold during a task, the runner asks the model for a high-signal task handoff summary, then resumes with:
   `main task prompt + summary` (history reset).
+- The same compression strategy is applied symmetrically to intermediate-lemma sub-agents.
 - Set `--threshold-compression 0` to disable this behavior.
 
 Optional semantic search env vars:
