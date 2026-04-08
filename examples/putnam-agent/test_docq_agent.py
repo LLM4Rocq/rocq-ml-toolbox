@@ -25,6 +25,7 @@ from agent.docq_agent import (  # noqa: E402
     build_docq_agent,
     build_docq_subagent,
 )
+from agent.docstring_tools import SemanticDocSearchClient  # noqa: E402
 from agent.library_tools import TocExplorer, read_source_via_client  # noqa: E402
 
 
@@ -227,6 +228,13 @@ class FakeMissingRefClient(FakeClient):
         raise RuntimeError("Coq: The reference lia was not found in the current environment.")
 
 
+class FakeImportProbeFailClient(FakeClient):
+    def run(self, state: State, cmd: str, timeout: float | None = None) -> State:
+        if cmd.strip() == "From Bad Require Import Missing.":
+            raise RuntimeError("Coq: Cannot find a physical path bound to logical path Missing.")
+        return super().run(state, cmd, timeout=timeout)
+
+
 class FakeMissingDeclaredLemmaClient(FakeClient):
     def run(self, state: State, cmd: str, timeout: float | None = None) -> State:
         m = re.search(r"pose\s+proof\s+\(([^)]+)\)\.", cmd)
@@ -356,6 +364,67 @@ def test_runner_output_validation_status_marker():
     assert marker2 == (7, 4, 1)
     assert ScalableDocqRunner._output_validation_status_marker({"error": "unavailable"}) is None
     assert ScalableDocqRunner._output_validation_status_marker({}) is None
+
+
+def test_semantic_doc_search_client_sends_env_and_sorts_top_k(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "results": [
+                    {
+                        "score": 0.2,
+                        "logical_path": "A.B",
+                        "relative_path": "a/b.v",
+                        "localization": {"start_line": 10},
+                    },
+                    {
+                        "score": 0.9,
+                        "logical_path": "C.D",
+                        "relative_path": "c/d.v",
+                        "localization": {"start_line": 3},
+                    },
+                    {
+                        "score": "0.5",
+                        "logical_path": "E.F",
+                        "relative_path": "e/f.v",
+                        "localization": {"start_line": 7},
+                    },
+                ]
+            }
+
+    def _fake_post(url: str, *, json: dict[str, Any], headers: dict[str, Any], timeout: float):
+        captured["url"] = url
+        captured["json"] = dict(json)
+        captured["headers"] = dict(headers)
+        captured["timeout"] = timeout
+        return _Resp()
+
+    monkeypatch.setattr("agent.docstring_tools.requests.post", _fake_post)
+    client = SemanticDocSearchClient(
+        base_url="http://127.0.0.1:8010",
+        route="/search",
+        api_key="tok",
+        env="coq-mathcomp",
+        timeout=12.0,
+    )
+    out = client.search("group homomorphism", k=2)
+
+    assert captured["url"] == "http://127.0.0.1:8010/search"
+    assert captured["json"] == {"query": "group homomorphism", "env": "coq-mathcomp", "k": 2}
+    assert captured["headers"]["Authorization"] == "Bearer tok"
+    assert captured["timeout"] == 12.0
+
+    assert len(out) == 2
+    assert out[0]["score"] == 0.9
+    assert out[1]["score"] == 0.5
+    assert out[0]["logical_path"] == "C.D"
+    assert out[0]["relative_path"] == "c/d.v"
+    assert out[0]["localization"]["start_line"] == 3
 
 
 def test_runner_attempt_limits_preserve_explicit_total_limit(tmp_path: Path):
@@ -581,6 +650,17 @@ def test_document_manager_add_import_accepts_full_statement_in_source(tmp_path: 
     assert "From mathcomp.fingroup Require Import perm." in workspace["content"]
 
 
+def test_document_manager_add_import_rejects_invalid_import_via_probe(tmp_path: Path):
+    client = FakeImportProbeFailClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+
+    with pytest.raises(ValueError, match="Import probe rejected"):
+        manager.add_import(libname="Bad", source="Missing")
+
+    assert manager.head_doc_id == 0
+    assert set(manager.nodes.keys()) == {0}
+
+
 def test_document_manager_prepare_intermediate_lemma_rejects_full_declaration(tmp_path: Path):
     client = FakeClient()
     session = DocqAgentSession.from_source(
@@ -662,6 +742,31 @@ def test_document_manager_prepare_intermediate_lemma_exposes_probe_error_details
     assert "explore_toc" in str(prep.get("probe_hint", ""))
     assert prep.get("probe_tactic") == "pose proof (helper_probe_error)."
     assert prep.get("lemma_statement") == "Lemma helper_probe_error : True."
+
+
+def test_run_tac_missing_ref_hint_mentions_semantic_when_enabled(tmp_path: Path):
+    manager = DocumentManager(
+        FakeMissingRefClient(),
+        _source_file(tmp_path),
+        timeout=5.0,
+        include_semantic_tool=True,
+    )
+    out = manager.run_tac(state_index=0, tactic="idtac.")
+    assert out["ok"] is False
+    assert "semantic_doc_search" in str(out.get("hint", ""))
+
+
+def test_run_tac_missing_ref_hint_omits_semantic_when_disabled(tmp_path: Path):
+    manager = DocumentManager(
+        FakeMissingRefClient(),
+        _source_file(tmp_path),
+        timeout=5.0,
+        include_semantic_tool=False,
+    )
+    out = manager.run_tac(state_index=0, tactic="idtac.")
+    assert out["ok"] is False
+    assert "semantic_doc_search" not in str(out.get("hint", ""))
+    assert "explore_toc" in str(out.get("hint", ""))
 
 
 def test_document_manager_prepare_intermediate_lemma_probe_missing_name_has_specific_hint(tmp_path: Path):
@@ -1083,6 +1188,8 @@ def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
     )
 
     class FakeSemantic:
+        env = "coq-demo"
+
         def search(self, query: str, k: int = 5) -> list[dict[str, Any]]:
             return [{"logical_path": "Demo.target", "docstring": query, "k": k}]
 
@@ -1116,6 +1223,7 @@ def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
     assert "explore_toc" in payload
     assert payload["explore_toc"]["ok"] is True
     assert "semantic_doc_search" in payload
+    assert payload["semantic_doc_search"]["env"] == "coq-demo"
     assert payload["semantic_doc_search"]["results"][0]["logical_path"] == "Demo.target"
     assert "read_source_file" in payload
     assert payload["read_source_file"]["ok"] is False
