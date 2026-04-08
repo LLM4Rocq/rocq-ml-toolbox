@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -39,6 +40,7 @@ DEFAULT_TOP_P = 0.95
 DEFAULT_MIN_P = 0.01
 DEFAULT_REPEAT_PENALTY = 1.0
 DEFAULT_THRESHOLD_COMPRESSION = 130_000
+DEFAULT_DOC_CHECKPOINT_INTERVAL_SECONDS = 300
 DEFAULT_PROMPT = (
     "Inspect the workspace and propose one useful intermediate lemma candidate, "
     "then attempt proving it."
@@ -95,6 +97,16 @@ def parse_args() -> argparse.Namespace:
             "Token threshold for context compaction. "
             "When exceeded, the runner asks the model for a continuation summary and restarts with "
             "'main task prompt + summary'. Use 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--doc-checkpoint-interval-seconds",
+        type=int,
+        default=DEFAULT_DOC_CHECKPOINT_INTERVAL_SECONDS,
+        help=(
+            "Periodic virtual-doc checkpoint interval in seconds "
+            f"(default: {DEFAULT_DOC_CHECKPOINT_INTERVAL_SECONDS}). "
+            "Set 0 to disable periodic checkpoints."
         ),
     )
     parser.add_argument(
@@ -197,6 +209,7 @@ class ScalableDocqRunner:
     compression_model: Any | None = None
     max_compressions_per_task: int = 8
     max_output_validation_recoveries: int = 4
+    doc_checkpoint_interval_seconds: int = DEFAULT_DOC_CHECKPOINT_INTERVAL_SECONDS
     _compression_agent: Agent[Any, str] | None = field(default=None, init=False, repr=False)
 
     def _log(self, message: str) -> None:
@@ -261,6 +274,10 @@ class ScalableDocqRunner:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(line)
             handle.write("\n")
+
+    @staticmethod
+    def _content_fingerprint(content: str) -> str:
+        return hashlib.sha1(content.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _extract_last_response_usage(run_ctx: Any) -> tuple[int, int, int, int] | None:
@@ -573,6 +590,7 @@ class ScalableDocqRunner:
         events_file = task_dir / "events.jsonl"
         compression_file = task_dir / "compression_summaries.jsonl"
         request_io_file = task_dir / "request_io.jsonl"
+        doc_checkpoints_file = task_dir / "doc_checkpoints.jsonl"
 
         summary: dict[str, Any] = {
             "task_label": task_label,
@@ -585,6 +603,7 @@ class ScalableDocqRunner:
             "events_file": events_file.name if events_file.exists() else None,
             "compression_summaries_file": compression_file.name if compression_file.exists() else None,
             "request_io_file": request_io_file.name if request_io_file.exists() else None,
+            "doc_checkpoints_file": doc_checkpoints_file.name if doc_checkpoints_file.exists() else None,
             "compression_rounds": compression_rounds,
         }
 
@@ -658,6 +677,9 @@ class ScalableDocqRunner:
         events_path = task_dir / "events.jsonl" if task_dir is not None else None
         compression_path = task_dir / "compression_summaries.jsonl" if task_dir is not None else None
         request_io_path = task_dir / "request_io.jsonl" if task_dir is not None else None
+        doc_checkpoints_path = task_dir / "doc_checkpoints.jsonl" if task_dir is not None else None
+        docs_dir = task_dir / "docs" if task_dir is not None else None
+        checkpoints_dir = docs_dir / "checkpoints" if docs_dir is not None else None
         if task_log_path is not None:
             task_log_path.write_text("", encoding="utf-8")
         if all_messages_path is not None:
@@ -670,6 +692,12 @@ class ScalableDocqRunner:
             compression_path.write_text("", encoding="utf-8")
         if request_io_path is not None:
             request_io_path.write_text("", encoding="utf-8")
+        if docs_dir is not None:
+            docs_dir.mkdir(parents=True, exist_ok=True)
+        if checkpoints_dir is not None:
+            checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        if doc_checkpoints_path is not None:
+            doc_checkpoints_path.write_text("", encoding="utf-8")
         captured_messages: list[Any] | None = None
         run_message_cursor = 0
         global_message_index = 0
@@ -681,6 +709,10 @@ class ScalableDocqRunner:
         last_logged_output_tokens = 0
         last_logged_main_response_index = -1
         compression_rounds = 0
+        doc_checkpoint_index = 0
+        doc_checkpoint_fingerprints: dict[int, str] = {}
+        checkpoint_stop = asyncio.Event()
+        checkpoint_task: asyncio.Task[Any] | None = None
 
         def _task_record(message: str) -> None:
             stamp = time.strftime("%H:%M:%S")
@@ -694,6 +726,78 @@ class ScalableDocqRunner:
         def _task_record_echo(message: str) -> None:
             _task_record(message)
             self._log(message)
+
+        def _checkpoint_virtual_docs(*, reason: str) -> None:
+            nonlocal doc_checkpoint_index
+            if session is None or docs_dir is None or checkpoints_dir is None:
+                return
+
+            live_doc_ids: set[int] = set()
+            changed_docs: list[tuple[int, str, str]] = []
+            for doc_id, node in sorted(session.doc_manager.nodes.items()):
+                live_doc_ids.add(doc_id)
+                fingerprint = self._content_fingerprint(node.content)
+                if doc_checkpoint_fingerprints.get(doc_id) != fingerprint:
+                    changed_docs.append((doc_id, node.content, fingerprint))
+
+            stale_ids = [doc_id for doc_id in list(doc_checkpoint_fingerprints.keys()) if doc_id not in live_doc_ids]
+            for stale_doc_id in stale_ids:
+                doc_checkpoint_fingerprints.pop(stale_doc_id, None)
+
+            if not changed_docs:
+                return
+
+            doc_checkpoint_index += 1
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            checkpoint_dir = checkpoints_dir / f"checkpoint_{doc_checkpoint_index:04d}_{stamp}"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+            changed_doc_ids: list[int] = []
+            for doc_id, content, fingerprint in changed_docs:
+                changed_doc_ids.append(doc_id)
+                (docs_dir / f"doc_{doc_id}.v").write_text(content, encoding="utf-8")
+                (checkpoint_dir / f"doc_{doc_id}.v").write_text(content, encoding="utf-8")
+                doc_checkpoint_fingerprints[doc_id] = fingerprint
+
+            head_doc_id = session.doc_manager.head_doc_id
+            self._append_jsonl(
+                doc_checkpoints_path,
+                {
+                    "checkpoint_index": doc_checkpoint_index,
+                    "reason": reason,
+                    "timestamp": stamp,
+                    "head_doc_id": head_doc_id,
+                    "changed_doc_ids": changed_doc_ids,
+                    "changed_docs_count": len(changed_doc_ids),
+                    "checkpoint_dir": str(checkpoint_dir.relative_to(task_dir)) if task_dir is not None else None,
+                },
+            )
+            _task_record_echo(
+                f"{task_label} | doc checkpoint saved("
+                f"index={doc_checkpoint_index}, reason={reason}, "
+                f"changed_docs={changed_doc_ids}, head_doc_id={head_doc_id})"
+            )
+
+        def _seed_doc_checkpoint_fingerprints() -> None:
+            if session is None:
+                return
+            doc_checkpoint_fingerprints.clear()
+            for doc_id, node in session.doc_manager.nodes.items():
+                doc_checkpoint_fingerprints[doc_id] = self._content_fingerprint(node.content)
+
+        async def _checkpoint_loop() -> None:
+            if self.doc_checkpoint_interval_seconds <= 0 or task_dir is None:
+                return
+            while True:
+                try:
+                    await asyncio.wait_for(checkpoint_stop.wait(), timeout=self.doc_checkpoint_interval_seconds)
+                    return
+                except asyncio.TimeoutError:
+                    try:
+                        _checkpoint_virtual_docs(reason="timer")
+                    except Exception as exc:
+                        _task_record_echo(f"{task_label} | doc checkpoint failed(reason=timer): {exc}")
+                        continue
 
         def _flush_captured_messages() -> None:
             nonlocal run_message_cursor, global_message_index
@@ -889,6 +993,14 @@ class ScalableDocqRunner:
                 f"total_tokens_limit={getattr(session.usage_limits, 'total_tokens_limit', None)}, "
                 f"compression_threshold_tokens={self.threshold_compression})"
             )
+            session_logger(
+                "doc checkpoint config("
+                f"interval_seconds={self.doc_checkpoint_interval_seconds}, "
+                f"enabled={bool(task_dir is not None and self.doc_checkpoint_interval_seconds > 0)})"
+            )
+            _seed_doc_checkpoint_fingerprints()
+            if task_dir is not None and self.doc_checkpoint_interval_seconds > 0:
+                checkpoint_task = asyncio.create_task(_checkpoint_loop())
             last_logged_requests = int(getattr(session.usage, "requests", 0) or 0)
             last_logged_input_tokens = int(getattr(session.usage, "input_tokens", 0) or 0)
             last_logged_output_tokens = int(getattr(session.usage, "output_tokens", 0) or 0)
@@ -1080,6 +1192,18 @@ class ScalableDocqRunner:
             _task_record(f"task failed: {task_label} ({exc})")
             raise
         finally:
+            checkpoint_stop.set()
+            if checkpoint_task is not None:
+                try:
+                    await checkpoint_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    _task_record(f"{task_label} | doc checkpoint loop terminated with error: {exc}")
+            try:
+                _checkpoint_virtual_docs(reason="task_end")
+            except Exception as exc:
+                _task_record(f"{task_label} | doc checkpoint failed(reason=task_end): {exc}")
             _flush_captured_messages()
             self._write_task_artifacts(
                 task_dir=task_dir,
@@ -1118,6 +1242,8 @@ def main() -> int:
         raise SystemExit("--max-requests must be >= 1")
     if args.threshold_compression < 0:
         raise SystemExit("--threshold-compression must be >= 0")
+    if args.doc_checkpoint_interval_seconds < 0:
+        raise SystemExit("--doc-checkpoint-interval-seconds must be >= 0")
     if args.max_output_validation_recoveries < 0:
         raise SystemExit("--max-output-validation-recoveries must be >= 0")
     if not (0.0 <= args.temperature <= 2.0):
@@ -1173,6 +1299,7 @@ def main() -> int:
         threshold_compression=args.threshold_compression,
         compression_model=model,
         max_output_validation_recoveries=args.max_output_validation_recoveries,
+        doc_checkpoint_interval_seconds=args.doc_checkpoint_interval_seconds,
     )
 
     tasks = [
@@ -1189,6 +1316,7 @@ def main() -> int:
         f"and concurrency={runner.max_concurrency} "
         f"(threshold-compression={args.threshold_compression}, min-p={args.min_p}, "
         f"repeat-penalty={args.repeat_penalty}, "
+        f"doc-checkpoint-interval-seconds={args.doc_checkpoint_interval_seconds}, "
         f"max-output-validation-recoveries={args.max_output_validation_recoveries})",
         flush=True,
     )
