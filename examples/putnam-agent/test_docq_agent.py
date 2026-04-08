@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -226,6 +227,15 @@ class FakeMissingRefClient(FakeClient):
         raise RuntimeError("Coq: The reference lia was not found in the current environment.")
 
 
+class FakeMissingDeclaredLemmaClient(FakeClient):
+    def run(self, state: State, cmd: str, timeout: float | None = None) -> State:
+        m = re.search(r"pose\s+proof\s+\(([^)]+)\)\.", cmd)
+        if m:
+            name = m.group(1).strip()
+            raise RuntimeError(f"Coq: The variable {name} was not found in the current environment.")
+        return super().run(state, cmd, timeout=timeout)
+
+
 class FakeQedFailClient(FakeClient):
     def __init__(self):
         super().__init__()
@@ -335,6 +345,19 @@ def test_runner_resume_prompt_after_output_validation_includes_recovery_steps():
     assert "get_goals" in text
 
 
+def test_runner_output_validation_status_marker():
+    marker = ScalableDocqRunner._output_validation_status_marker(
+        {"doc_id": 3, "latest_state_index": 9, "latest_goals_count": 2}
+    )
+    assert marker == (3, 9, 2)
+    marker2 = ScalableDocqRunner._output_validation_status_marker(
+        {"head_doc_id": 7, "latest_state_index": 4, "latest_goals_count": 1}
+    )
+    assert marker2 == (7, 4, 1)
+    assert ScalableDocqRunner._output_validation_status_marker({"error": "unavailable"}) is None
+    assert ScalableDocqRunner._output_validation_status_marker({}) is None
+
+
 def test_runner_attempt_limits_preserve_explicit_total_limit(tmp_path: Path):
     client = FakeClient()
     session = DocqAgentSession.from_source(
@@ -387,14 +410,16 @@ def test_subagent_attempt_limits_preserve_explicit_total_limit(tmp_path: Path):
         output_tokens_limit=222,
         total_tokens_limit=444,
     )
+    session.usage.tool_calls = 13
+    session.usage.requests = 14
     session.usage.input_tokens = 80_000
     session.usage.output_tokens = 8_888
     limits = session._subagent_attempt_usage_limits(
         remaining_tool_calls=7,
         remaining_requests=6,
     )
-    assert limits.tool_calls_limit == 7
-    assert limits.request_limit == 6
+    assert limits.tool_calls_limit == 20
+    assert limits.request_limit == 20
     assert limits.total_tokens_limit == 444
 
 
@@ -464,6 +489,14 @@ def test_run_tac_rejects_placeholder_tactic(tmp_path: Path):
     assert "placeholder tactic" in out["error"]
 
 
+def test_run_tac_rejects_shelving_tactic(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    out = manager.run_tac(state_index=0, tactic="all: shelve.")
+    assert out["ok"] is False
+    assert "shelving tactics" in out["error"]
+
+
 def test_run_tac_missing_reference_includes_hint(tmp_path: Path):
     client = FakeMissingRefClient()
     manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
@@ -471,6 +504,20 @@ def test_run_tac_missing_reference_includes_hint(tmp_path: Path):
     assert out["ok"] is False
     assert "not found in the current environment" in out["error"]
     assert "add_import" in str(out.get("hint", ""))
+
+
+def test_run_tac_repeated_same_failure_triggers_loop_guard(tmp_path: Path):
+    client = FakeMissingRefClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    out1 = manager.run_tac(state_index=0, tactic="lia.")
+    out2 = manager.run_tac(state_index=0, tactic="lia.")
+    out3 = manager.run_tac(state_index=0, tactic="lia.")
+    assert out1["ok"] is False
+    assert out2["ok"] is False
+    assert out3["ok"] is False
+    assert out3.get("loop_guard_triggered") is True
+    assert int(out3.get("failure_repeat_count", 0)) >= 3
+    assert "Loop guard:" in str(out3.get("hint", ""))
 
 
 def test_document_manager_checkout_and_list_docs(tmp_path: Path):
@@ -574,6 +621,53 @@ def test_document_manager_prepare_intermediate_lemma_rejects_unicode_logic(tmp_p
     assert "Unicode logical symbols" in str(prep.get("error", ""))
     assert len(session.list_pending_intermediate_lemmas()) == 0
     assert len(client.tmp_file_calls) == before_calls
+
+
+def test_document_manager_prepare_intermediate_lemma_exposes_probe_error_details(tmp_path: Path):
+    client = FakeMissingRefClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    prep = session.prepare_intermediate_lemma(
+        lemma_type="True",
+        lemma_name="helper_probe_error",
+    )
+    assert prep["ok"] is False
+    assert prep["phase"] == "prepare"
+    assert prep["lemma_name"] == "helper_probe_error"
+    assert "probe tactic" in str(prep.get("error", "")).lower()
+    assert "helper_probe_error" in str(prep.get("error", ""))
+    assert "lia was not found" in str(prep.get("probe_error", ""))
+    assert "explore_toc" in str(prep.get("probe_hint", ""))
+    assert prep.get("probe_tactic") == "pose proof (helper_probe_error)."
+    assert prep.get("lemma_statement") == "Lemma helper_probe_error : True."
+
+
+def test_document_manager_prepare_intermediate_lemma_probe_missing_name_has_specific_hint(tmp_path: Path):
+    client = FakeMissingDeclaredLemmaClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    prep = session.prepare_intermediate_lemma(
+        lemma_type="True",
+        lemma_name="helper_probe_missing",
+    )
+    assert prep["ok"] is False
+    assert prep["phase"] == "prepare"
+    assert prep["lemma_name"] == "helper_probe_missing"
+    assert prep.get("probe_tactic") == "pose proof (helper_probe_missing)."
+    assert "Internal probe note" in str(prep.get("probe_hint", ""))
+    assert "missing library import" in str(prep.get("probe_hint", ""))
+    assert "add_import" not in str(prep.get("probe_hint", ""))
+    assert prep.get("statement_probe_tactic") == "assert (True)."
 
 
 def test_document_manager_doc_id_for_source_path(tmp_path: Path):
