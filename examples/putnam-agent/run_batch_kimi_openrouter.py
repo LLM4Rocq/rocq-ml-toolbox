@@ -29,6 +29,8 @@ DEFAULT_MODEL = "moonshotai/kimi-k2.5"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_TOP_P = 0.95
+DEFAULT_MIN_P = 0.01
+DEFAULT_REPEAT_PENALTY = 1.0
 DEFAULT_PROMPT = (
     "Prove the theorem. Start from state index 0. Use run_tac/get_goals/list_states as needed. "
     "Before finishing, call safe_verify(final_proof), then call end(final_proof). "
@@ -79,6 +81,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_TOP_P,
         help=f"Nucleus sampling top-p (default: {DEFAULT_TOP_P}).",
     )
+    parser.add_argument(
+        "--min-p",
+        type=float,
+        default=DEFAULT_MIN_P,
+        help=f"Minimum probability cutoff (OpenRouter `min_p`, default: {DEFAULT_MIN_P}).",
+    )
+    parser.add_argument(
+        "--repeat-penalty",
+        type=float,
+        default=DEFAULT_REPEAT_PENALTY,
+        help=f"Repetition penalty (OpenRouter `repetition_penalty`, default: {DEFAULT_REPEAT_PENALTY}).",
+    )
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="Prompt used for every agent.")
     parser.add_argument(
         "--quiet",
@@ -95,9 +109,18 @@ def _build_model(
     *,
     temperature: float,
     top_p: float,
+    min_p: float,
+    repeat_penalty: float,
 ) -> OpenAIChatModel:
     provider = OpenAIProvider(base_url=base_url, api_key=api_key)
-    settings = ModelSettings(temperature=temperature, top_p=top_p)
+    settings = ModelSettings(
+        temperature=temperature,
+        top_p=top_p,
+        extra_body={
+            "min_p": min_p,
+            "repetition_penalty": repeat_penalty,
+        },
+    )
     return OpenAIChatModel(model_name, provider=provider, settings=settings)
 
 
@@ -111,6 +134,10 @@ def main() -> int:
         raise SystemExit("--temperature must be in [0, 2]")
     if not (0.0 < args.top_p <= 1.0):
         raise SystemExit("--top-p must be in (0, 1]")
+    if not (0.0 <= args.min_p <= 1.0):
+        raise SystemExit("--min-p must be in [0, 1]")
+    if args.repeat_penalty <= 0.0:
+        raise SystemExit("--repeat-penalty must be > 0")
     if not args.openrouter_api_key:
         raise SystemExit("Missing OpenRouter API key. Use --openrouter-api-key or OPENROUTER_API_KEY.")
 
@@ -121,6 +148,8 @@ def main() -> int:
         args.model,
         temperature=args.temperature,
         top_p=args.top_p,
+        min_p=args.min_p,
+        repeat_penalty=args.repeat_penalty,
     )
     agent = build_scalable_putnam_agent(model=model)
 
@@ -146,7 +175,8 @@ def main() -> int:
 
     print(
         f"Running {args.num_agents} agents on {problem.source_path} with model={args.model} "
-        f"and concurrency={runner.max_concurrency}",
+        f"and concurrency={runner.max_concurrency} "
+        f"(min-p={args.min_p}, repeat-penalty={args.repeat_penalty})",
         flush=True,
     )
     outputs = runner.run_many_sync(tasks)

@@ -26,6 +26,11 @@ DOCQ_SYSTEM_PROMPT = (
     "Rules:\n"
     "- Use `explore_toc` incrementally and discover root entries first.\n"
     "- Use `read_source_file` to inspect library files with optional line window.\n"
+    "- Use `semantic_doc_search(query, k)` with natural-language intent queries (not raw formulas).\n"
+    "  Good examples: 'lemma about cardinality of finite permutations', "
+    "'result relating nat exponent positivity', "
+    "'mathcomp ordinal inequality lemmas'.\n"
+    "  Prefer k=10 by default; increase to k=15 for broader recall.\n"
     "- For library reads, pass TOC-relative file paths exactly as returned by `explore_toc`.\n"
     "- Use `show_workspace` or `show_doc(doc_id)` to inspect virtual files.\n"
     "- Use `completion_status(doc_id?)` before finishing; do not end while `latest_goals_count > 0`.\n"
@@ -100,6 +105,12 @@ def _lemma_subagent_prompt(*, include_semantic_tool: bool) -> str:
         "You are proving one intermediate lemma.\n"
         "Use tools:\n"
         f"- {retrieval_line}\n"
+        "- For `semantic_doc_search`, write natural-language retrieval queries; "
+        "avoid raw Coq formulas as query text.\n"
+        "  Example queries: 'mathcomp lemma about ordinals and <='; "
+        "'finite set cardinality theorem for permutations'; "
+        "'Coq lemma rewriting n - 0'.\n"
+        "- Use k=10 by default; try k=15 if top hits look too narrow.\n"
         "- For library reads, pass TOC-relative file paths exactly as returned by `explore_toc`.\n"
         "- `read_source_file` is for library files only; do NOT pass workspace `/tmp/...` paths.\n"
         "- For current proof file content, always use `read_workspace_source`.\n"
@@ -252,6 +263,7 @@ def _rebuild_branch_with_import(branch: BranchSession, *, libname: str, source: 
         timeout=branch.timeout,
         nodes=[StateNode(index=0, parent_index=None, tactic=None, state=state0)],
         logger=branch.logger,
+        include_semantic_tool=branch.include_semantic_tool,
     )
     replayed = 0
     state_index = 0
@@ -271,6 +283,7 @@ def _adopt_branch_state(dst: BranchSession, src: BranchSession) -> None:
     dst.source_content = src.source_content
     dst.layout = src.layout
     dst.nodes = src.nodes
+    dst.include_semantic_tool = src.include_semantic_tool
 
 
 def _rebuild_branch_on_client(branch: BranchSession, *, client: Any) -> BranchSession:
@@ -292,6 +305,7 @@ def _rebuild_branch_on_client(branch: BranchSession, *, client: Any) -> BranchSe
         timeout=branch.timeout,
         nodes=[StateNode(index=0, parent_index=None, tactic=None, state=state0)],
         logger=branch.logger,
+        include_semantic_tool=branch.include_semantic_tool,
     )
     state_index = 0
     for tactic in _branch_tactics_path(branch):
@@ -408,7 +422,7 @@ def build_docq_subagent(
         def semantic_doc_search(
             ctx: RunContext[LemmaSubSession],
             query: str,
-            k: int = 5,
+            k: int = 10,
         ) -> dict[str, Any]:
             _sub_log(ctx, f"semantic_doc_search(query={query!r}, k={k})")
             if ctx.deps.semantic_search is None:
@@ -417,7 +431,12 @@ def build_docq_subagent(
                 raise ModelRetry("k must be >= 1")
             results = ctx.deps.semantic_search.search(query=query, k=k)
             _sub_log(ctx, f"semantic_doc_search -> {len(results)} results")
-            return {"query": query, "k": k, "results": results}
+            return {
+                "query": query,
+                "k": k,
+                "env": getattr(ctx.deps.semantic_search, "env", None),
+                "results": results,
+            }
 
     @agent.tool
     def read_source_file(
@@ -576,6 +595,7 @@ class DocqAgentSession:
     doc_manager: DocumentManager
     toc_explorer: TocExplorer
     semantic_search: SemanticDocSearchClient | None = None
+    semantic_env: str = "coq-mathcomp"
     timeout: float = 60.0
     usage: RunUsage = field(default_factory=RunUsage)
     usage_limits: UsageLimits = field(default_factory=lambda: UsageLimits(tool_calls_limit=120, request_limit=200))
@@ -604,6 +624,7 @@ class DocqAgentSession:
         semantic_base_url: str | None = None,
         semantic_route: str = "/search",
         semantic_api_key: str | None = None,
+        semantic_env: str = "coq-mathcomp",
         max_tool_calls: int = 120,
         max_requests: int | None = 200,
         subagent_model: Any = None,
@@ -619,7 +640,13 @@ class DocqAgentSession:
         if connect:
             locked_client.connect()
         source = Path(source_path).resolve()
-        manager = DocumentManager(locked_client, source, timeout=timeout, logger=logger)
+        manager = DocumentManager(
+            locked_client,
+            source,
+            timeout=timeout,
+            logger=logger,
+            include_semantic_tool=include_semantic_tool,
+        )
         explorer = TocExplorer(locked_client, env=env)
         semantic_client = None
         if semantic_base_url:
@@ -627,6 +654,7 @@ class DocqAgentSession:
                 base_url=semantic_base_url,
                 route=semantic_route,
                 api_key=semantic_api_key,
+                env=semantic_env,
                 timeout=timeout,
             )
         session = cls(
@@ -636,6 +664,7 @@ class DocqAgentSession:
             doc_manager=manager,
             toc_explorer=explorer,
             semantic_search=semantic_client,
+            semantic_env=semantic_env,
             timeout=timeout,
             usage=RunUsage(),
             usage_limits=UsageLimits(tool_calls_limit=max_tool_calls, request_limit=max_requests),
@@ -1682,14 +1711,19 @@ def build_docq_agent(
         def semantic_doc_search(
             ctx: RunContext[DocqAgentSession],
             query: str,
-            k: int = 5,
+            k: int = 10,
         ) -> dict[str, Any]:
             if ctx.deps.semantic_search is None:
                 raise ModelRetry("Semantic search is not configured for this session.")
             if k < 1:
                 raise ModelRetry("k must be >= 1")
             results = ctx.deps.semantic_search.search(query=query, k=k)
-            return {"query": query, "k": k, "results": results}
+            return {
+                "query": query,
+                "k": k,
+                "env": getattr(ctx.deps.semantic_search, "env", ctx.deps.semantic_env),
+                "results": results,
+            }
 
     @agent.tool
     def read_source_file(

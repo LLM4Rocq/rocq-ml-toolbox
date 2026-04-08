@@ -89,11 +89,17 @@ def _normalize_lemma_type(lemma_type: str) -> str:
     return out
 
 
-def _tactic_error_hint(error: str) -> str | None:
+def _tactic_error_hint(error: str, *, include_semantic_tool: bool = True) -> str | None:
     if MISSING_IN_ENV_RE.search(error):
+        retrieval_guidance = "`explore_toc` + `read_source_file`"
+        if include_semantic_tool:
+            retrieval_guidance += (
+                " (optionally `semantic_doc_search` with a natural-language query "
+                "to find relevant modules/lemmas faster)"
+            )
         return (
             "A referenced constant/tactic is missing in the current environment. "
-            "If this comes from a library, use `explore_toc` + `read_source_file` to find the module, "
+            f"If this comes from a library, use {retrieval_guidance} to find the module, "
             "then add it via `add_import` (main) or `require_import` (subagent). "
             "Do not guess import roots; derive `libname`/`source` from TOC entries."
         )
@@ -269,6 +275,7 @@ class BranchSession:
     timeout: float
     nodes: list[StateNode] = field(default_factory=list)
     logger: Callable[[str], None] | None = None
+    include_semantic_tool: bool = True
     _last_failure_signature: tuple[int, str] | None = None
     _last_failure_count: int = 0
 
@@ -373,7 +380,7 @@ class BranchSession:
             new_state = self.client.run(node.state, tactic, timeout=self.timeout)
         except Exception as exc:
             error = str(exc)
-            hint = _tactic_error_hint(error)
+            hint = _tactic_error_hint(error, include_semantic_tool=self.include_semantic_tool)
             signature = (state_index, _normalize_error_for_loop_guard(error))
             if signature == self._last_failure_signature:
                 self._last_failure_count += 1
@@ -496,12 +503,14 @@ class DocumentManager:
         timeout: float = 60.0,
         logger: Callable[[str], None] | None = None,
         mutation_validator: MutationValidator | None = None,
+        include_semantic_tool: bool = True,
     ):
         self.client = client
         self.source_path = Path(source_path).resolve()
         self.timeout = timeout
         self.logger = logger
         self.mutation_validator = mutation_validator
+        self.include_semantic_tool = bool(include_semantic_tool)
 
         root_content = self.source_path.read_text(encoding="utf-8")
         self.nodes: dict[int, DocumentNode] = {
@@ -545,6 +554,7 @@ class DocumentManager:
             timeout=self.timeout,
             nodes=[StateNode(index=0, parent_index=None, tactic=None, state=state0)],
             logger=self.logger,
+            include_semantic_tool=self.include_semantic_tool,
         )
         if doc_id < 0:
             prefix = "initialized transient doc session"
@@ -842,6 +852,46 @@ class DocumentManager:
                 return idx
         return -1
 
+    def _probe_import_statement(
+        self,
+        *,
+        layout: ParsedDocumentLayout,
+        insert_index: int,
+        statement: str,
+    ) -> None:
+        """Probe import with Coq before mutating documents.
+
+        We position on the import line and execute the same `From ... Require Import ...`
+        command through the raw client to surface missing-path/module errors early.
+        """
+        probe_prefix = list(layout.prefix_lines)
+        probe_prefix.insert(insert_index, statement)
+        probe_content = _join_lines(
+            probe_prefix + layout.target_lines + layout.suffix_lines,
+            trailing_newline=True,
+        )
+        probe_path = Path(self.client.tmp_file(content=probe_content)).resolve()
+        probe_line = max(1, insert_index + 1)
+        try:
+            probe_state = self.client.get_state_at_pos(
+                str(probe_path),
+                probe_line,
+                0,
+                timeout=self.timeout,
+            )
+        except Exception as exc:
+            raise ValueError(
+                "Import probe failed while positioning before the inserted import "
+                f"(line={probe_line}, statement={statement!r}): {exc}"
+            ) from exc
+        try:
+            self.client.run(probe_state, statement, timeout=self.timeout)
+        except Exception as exc:
+            raise ValueError(
+                f"Import probe rejected `{statement}`: {exc}. "
+                "Verify `libname`/`source` with `explore_toc` before calling add_import."
+            ) from exc
+
     @staticmethod
     def _find_lemma_range(prefix_lines: list[str], *, lemma_name: str) -> tuple[int, int] | None:
         start_re = re.compile(rf"^\s*Lemma\s+{re.escape(lemma_name)}\s*:")
@@ -879,6 +929,7 @@ class DocumentManager:
         )
         prefix = list(layout.prefix_lines)
         idx = self._import_insert_index(prefix)
+        self._probe_import_statement(layout=layout, insert_index=idx, statement=statement)
         prefix.insert(idx, statement)
         new_content = _join_lines(prefix + layout.target_lines + layout.suffix_lines, trailing_newline=True)
 

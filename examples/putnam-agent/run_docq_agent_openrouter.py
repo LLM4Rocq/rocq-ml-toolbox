@@ -40,7 +40,7 @@ DEFAULT_TOP_P = 0.95
 DEFAULT_MIN_P = 0.01
 DEFAULT_REPEAT_PENALTY = 1.0
 DEFAULT_THRESHOLD_COMPRESSION = 130_000
-DEFAULT_DOC_CHECKPOINT_INTERVAL_SECONDS = 300
+DEFAULT_DOC_CHECKPOINT_INTERVAL_SECONDS = 60
 DEFAULT_PROMPT = (
     "Inspect the workspace and propose one useful intermediate lemma candidate, "
     "then attempt proving it."
@@ -155,6 +155,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--semantic-route", default=os.getenv("DOCQ_SEARCH_ROUTE", "/search"))
     parser.add_argument("--semantic-api-key", default=os.getenv("DOCQ_SEARCH_API_KEY"))
     parser.add_argument(
+        "--semantic-env",
+        default=os.getenv("DOCQ_SEARCH_ENV", "coq-mathcomp"),
+        help="Retrieval environment sent to semantic /search (default: coq-mathcomp).",
+    )
+    parser.add_argument(
         "--disable-semantic-tool",
         action="store_true",
         help="Disable semantic_doc_search tool exposure (main + sub-agent).",
@@ -200,6 +205,7 @@ class ScalableDocqRunner:
     semantic_base_url: str | None = None
     semantic_route: str = "/search"
     semantic_api_key: str | None = None
+    semantic_env: str = "coq-mathcomp"
     include_semantic_tool: bool = True
     logger: Callable[[str], None] | None = None
     log_enabled: bool = False
@@ -710,7 +716,7 @@ class ScalableDocqRunner:
         last_logged_main_response_index = -1
         compression_rounds = 0
         doc_checkpoint_index = 0
-        doc_checkpoint_fingerprints: dict[int, str] = {}
+        doc_checkpoint_markers: dict[int, tuple[str, int]] = {}
         checkpoint_stop = asyncio.Event()
         checkpoint_task: asyncio.Task[Any] | None = None
 
@@ -733,16 +739,29 @@ class ScalableDocqRunner:
                 return
 
             live_doc_ids: set[int] = set()
-            changed_docs: list[tuple[int, str, str]] = []
+            changed_docs: list[dict[str, Any]] = []
             for doc_id, node in sorted(session.doc_manager.nodes.items()):
                 live_doc_ids.add(doc_id)
-                fingerprint = self._content_fingerprint(node.content)
-                if doc_checkpoint_fingerprints.get(doc_id) != fingerprint:
-                    changed_docs.append((doc_id, node.content, fingerprint))
+                session_branch = session.doc_manager.sessions.get(doc_id)
+                latest_state_index = (
+                    int(session_branch.latest_state_index) if session_branch is not None else -1
+                )
+                content_hash = self._content_fingerprint(node.content)
+                marker = (content_hash, latest_state_index)
+                if doc_checkpoint_markers.get(doc_id) != marker:
+                    changed_docs.append(
+                        {
+                            "doc_id": doc_id,
+                            "content": node.content,
+                            "marker": marker,
+                            "latest_state_index": latest_state_index,
+                            "has_session": session_branch is not None,
+                        }
+                    )
 
-            stale_ids = [doc_id for doc_id in list(doc_checkpoint_fingerprints.keys()) if doc_id not in live_doc_ids]
+            stale_ids = [doc_id for doc_id in list(doc_checkpoint_markers.keys()) if doc_id not in live_doc_ids]
             for stale_doc_id in stale_ids:
-                doc_checkpoint_fingerprints.pop(stale_doc_id, None)
+                doc_checkpoint_markers.pop(stale_doc_id, None)
 
             if not changed_docs:
                 return
@@ -753,11 +772,39 @@ class ScalableDocqRunner:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
             changed_doc_ids: list[int] = []
-            for doc_id, content, fingerprint in changed_docs:
+            changed_docs_meta: list[dict[str, Any]] = []
+            for changed in changed_docs:
+                doc_id = int(changed["doc_id"])
+                content = str(changed["content"])
+                marker = changed["marker"]
+                latest_state_index = int(changed.get("latest_state_index", -1))
                 changed_doc_ids.append(doc_id)
                 (docs_dir / f"doc_{doc_id}.v").write_text(content, encoding="utf-8")
                 (checkpoint_dir / f"doc_{doc_id}.v").write_text(content, encoding="utf-8")
-                doc_checkpoint_fingerprints[doc_id] = fingerprint
+                materialized_error: str | None = None
+                materialized_written = False
+                if changed.get("has_session", False):
+                    try:
+                        materialized = session.doc_manager.materialized_source(
+                            doc_id=doc_id,
+                            state_index=latest_state_index if latest_state_index >= 0 else None,
+                        )
+                        (docs_dir / f"doc_{doc_id}_materialized.v").write_text(materialized, encoding="utf-8")
+                        (checkpoint_dir / f"doc_{doc_id}_materialized.v").write_text(
+                            materialized, encoding="utf-8"
+                        )
+                        materialized_written = True
+                    except Exception as exc:
+                        materialized_error = str(exc)
+                changed_docs_meta.append(
+                    {
+                        "doc_id": doc_id,
+                        "latest_state_index": latest_state_index,
+                        "materialized_written": materialized_written,
+                        "materialized_error": materialized_error,
+                    }
+                )
+                doc_checkpoint_markers[doc_id] = marker
 
             head_doc_id = session.doc_manager.head_doc_id
             self._append_jsonl(
@@ -769,6 +816,7 @@ class ScalableDocqRunner:
                     "head_doc_id": head_doc_id,
                     "changed_doc_ids": changed_doc_ids,
                     "changed_docs_count": len(changed_doc_ids),
+                    "changed_docs": changed_docs_meta,
                     "checkpoint_dir": str(checkpoint_dir.relative_to(task_dir)) if task_dir is not None else None,
                 },
             )
@@ -781,9 +829,14 @@ class ScalableDocqRunner:
         def _seed_doc_checkpoint_fingerprints() -> None:
             if session is None:
                 return
-            doc_checkpoint_fingerprints.clear()
+            doc_checkpoint_markers.clear()
             for doc_id, node in session.doc_manager.nodes.items():
-                doc_checkpoint_fingerprints[doc_id] = self._content_fingerprint(node.content)
+                session_branch = session.doc_manager.sessions.get(doc_id)
+                latest_state_index = int(session_branch.latest_state_index) if session_branch is not None else -1
+                doc_checkpoint_markers[doc_id] = (
+                    self._content_fingerprint(node.content),
+                    latest_state_index,
+                )
 
         async def _checkpoint_loop() -> None:
             if self.doc_checkpoint_interval_seconds <= 0 or task_dir is None:
@@ -974,6 +1027,7 @@ class ScalableDocqRunner:
                 semantic_base_url=self.semantic_base_url,
                 semantic_route=self.semantic_route,
                 semantic_api_key=self.semantic_api_key,
+                semantic_env=self.semantic_env,
                 max_tool_calls=self.max_tool_calls,
                 max_requests=self.max_requests,
                 subagent_model=self.subagent_model,
@@ -1254,6 +1308,8 @@ def main() -> int:
         raise SystemExit("--min-p must be in [0, 1]")
     if args.repeat_penalty <= 0.0:
         raise SystemExit("--repeat-penalty must be > 0")
+    if not str(args.semantic_env).strip():
+        raise SystemExit("--semantic-env must be a non-empty string")
     if not args.openrouter_api_key:
         raise SystemExit("Missing OpenRouter API key. Use --openrouter-api-key or OPENROUTER_API_KEY.")
     source = args.source.resolve()
@@ -1291,6 +1347,7 @@ def main() -> int:
         semantic_base_url=args.semantic_base_url,
         semantic_route=args.semantic_route,
         semantic_api_key=args.semantic_api_key,
+        semantic_env=args.semantic_env,
         max_tool_calls=args.max_tool_calls,
         max_requests=args.max_requests,
         max_concurrency=args.max_concurrency or args.num_agents,
@@ -1316,6 +1373,7 @@ def main() -> int:
         f"and concurrency={runner.max_concurrency} "
         f"(threshold-compression={args.threshold_compression}, min-p={args.min_p}, "
         f"repeat-penalty={args.repeat_penalty}, "
+        f"semantic-env={args.semantic_env}, "
         f"doc-checkpoint-interval-seconds={args.doc_checkpoint_interval_seconds}, "
         f"max-output-validation-recoveries={args.max_output_validation_recoveries})",
         flush=True,
