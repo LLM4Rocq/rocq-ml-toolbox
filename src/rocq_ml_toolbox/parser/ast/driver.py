@@ -31,15 +31,30 @@ def diags_dump_path(filepath: str | Path) -> Path:
 def run_fcc(filepath: str | Path, *, root: Optional[str]=None, cfg: FccConfig = FccConfig(), max_errors=10_000):
     filepath = Path(filepath)
 
-    diags = diags_dump_path(filepath)
+    proof_dump = proof_dump_path(filepath)
+    ast_dump = ast_dump_path(filepath)
     cmd = [cfg.fcc_cmd]
     if root:
         cmd.append(f"--root={root}")
     cmd.extend([f"--plugin={cfg.plugin}", str(filepath), "--no_vo", f"--max_errors={max_errors}"])
-    subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
 
-    if not diags.exists():
-        raise RuntimeError(f"Expected diags dump not found: {diags}")
+    # Some fcc/coq-lsp versions do not emit a *.diags file for warning-free files.
+    # The proof and AST dumps are required outputs.
+    if proof_dump.exists() and ast_dump.exists():
+        return
+
+    output = (proc.stderr or proc.stdout).strip()
+    if proc.returncode != 0:
+        detail = f"fcc failed with exit code {proc.returncode}"
+        if output:
+            detail = f"{detail}: {output}"
+        raise RuntimeError(detail)
+
+    missing = [str(p) for p in (proof_dump, ast_dump) if not p.exists()]
+    if output:
+        raise RuntimeError(f"Expected dump not found ({', '.join(missing)}). fcc output: {output}")
+    raise RuntimeError(f"Expected dump not found ({', '.join(missing)}).")
 
 def load_jsonl(path: Path) -> List[dict]:
     content: List[dict] = []
@@ -62,7 +77,8 @@ def load_proof_dump(filepath: str | Path, *, root: Optional[str] = None, force_d
 
     proof_contents = json.loads(proof_dump.read_text())
     ast_contents = json.loads(ast_dump.read_text())['astdump_jsonl']
-    return proof_contents, ast_contents, parse_diagnostics_file(diags)
+    diagnostics = parse_diagnostics_file(diags) if diags.exists() else []
+    return proof_contents, ast_contents, diagnostics
 
 def parse_proof_dump(
         proof_dump: List[dict]
