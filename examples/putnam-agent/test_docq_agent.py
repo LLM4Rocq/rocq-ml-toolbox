@@ -16,12 +16,18 @@ from pydantic_ai.usage import UsageLimits
 
 THIS_DIR = Path(__file__).resolve().parent
 
-from run_docq_agent_openrouter import ScalableDocqRunner  # noqa: E402
-from agent.doc_manager import DocumentManager  # noqa: E402
+from run_docq_agent_openrouter import DocqAgentTask, ScalableDocqRunner  # noqa: E402
+from agent.doc_manager import DocumentManager, _clip_goal_text, _normalize_import_parts  # noqa: E402
 from agent.docq_agent import (  # noqa: E402
+    ABORT_MIN_CHARS,
+    ABORT_MIN_WORDS,
     DocqAgentSession,
     LemmaSubSession,
+    _validate_subagent_abort_explanation,
+    _adopt_branch_state,
+    _create_nested_lemma_subsession,
     _rebuild_branch_with_import,
+    _register_nested_lemma_into_branch,
     build_docq_agent,
     build_docq_subagent,
 )
@@ -35,6 +41,7 @@ class FakeClient:
         self.run_calls: list[tuple[int, str]] = []
         self.state_calls: list[tuple[str, int, int]] = []
         self.tmp_file_calls: list[dict[str, Any]] = []
+        self.safeverify_calls: list[dict[str, Any]] = []
         self._next_state_id = 1
 
     def connect(self) -> None:
@@ -58,7 +65,15 @@ class FakeClient:
         self.run_calls.append((state.st, cmd))
         if cmd.startswith("fail"):
             raise RuntimeError("tactic failed")
-        st = State(st=self._next_state_id, proof_finished=False, feedback=[], hash=self._next_state_id)
+        # Keep fake `proof_finished` coherent with `goals`: this fake backend
+        # marks states >=2 as solved.
+        proof_finished = self._next_state_id >= 2
+        st = State(
+            st=self._next_state_id,
+            proof_finished=proof_finished,
+            feedback=[],
+            hash=self._next_state_id,
+        )
         self._next_state_id += 1
         return st
 
@@ -126,6 +141,37 @@ class FakeClient:
             "next_offset": next_offset,
             "eof": next_offset >= len(content),
             "total_chars": len(content),
+        }
+
+    def safeverify(
+        self,
+        source: str,
+        target: str,
+        root: str,
+        axiom_whitelist: list[str] | None = None,
+        save_path: str | None = None,
+        verbose: bool = False,
+    ) -> dict[str, Any]:
+        self.safeverify_calls.append(
+            {
+                "source": source,
+                "target": target,
+                "root": root,
+                "axiom_whitelist": list(axiom_whitelist or []),
+                "save_path": save_path,
+                "verbose": verbose,
+            }
+        )
+        return {
+            "ok": True,
+            "summary": {
+                "num_obligations": 1,
+                "passed": 1,
+                "failed": 0,
+                "global_failures": 0,
+            },
+            "global_failures": [],
+            "outcomes": [],
         }
 
 
@@ -256,6 +302,53 @@ class FakeQedFailClient(FakeClient):
         return super().run(state, cmd, timeout=timeout)
 
 
+class FakeSafeVerifyFailClient(FakeClient):
+    def safeverify(
+        self,
+        source: str,
+        target: str,
+        root: str,
+        axiom_whitelist: list[str] | None = None,
+        save_path: str | None = None,
+        verbose: bool = False,
+    ) -> dict[str, Any]:
+        base = super().safeverify(
+            source,
+            target,
+            root,
+            axiom_whitelist=axiom_whitelist,
+            save_path=save_path,
+            verbose=verbose,
+        )
+        base["ok"] = False
+        base["summary"] = {
+            "num_obligations": 1,
+            "passed": 0,
+            "failed": 1,
+            "global_failures": 0,
+        }
+        base["outcomes"] = [
+            {
+                "ok": False,
+                "obligation": {"name": "target"},
+                "failure_codes": ["disallowed_axioms"],
+            }
+        ]
+        return base
+
+
+class FakeZeroGoalsNotFinishedClient(FakeClient):
+    """Simulate shelved/unfocused obligations: no focused goals but proof not closed."""
+
+    def run(self, state: State, cmd: str, timeout: float | None = None) -> State:
+        self.run_calls.append((state.st, cmd))
+        if cmd.startswith("fail"):
+            raise RuntimeError("tactic failed")
+        st = State(st=self._next_state_id, proof_finished=False, feedback=[], hash=self._next_state_id)
+        self._next_state_id += 1
+        return st
+
+
 def _source_file(tmp_path: Path) -> Path:
     source = tmp_path / "demo.v"
     source.write_text(
@@ -339,6 +432,36 @@ def test_runner_detects_output_validation_retry_exhaustion():
     assert ScalableDocqRunner._is_output_validation_retry_exhaustion(other) is False
 
 
+def test_runner_detects_retryable_transport_error():
+    exc = RuntimeError("Exception: Response payload is not completed")
+    assert ScalableDocqRunner._is_retryable_transport_error(exc) is True
+    exc_history = RuntimeError(
+        "Cannot provide a new user prompt when the message history contains unprocessed tool calls."
+    )
+    assert ScalableDocqRunner._is_retryable_transport_error(exc_history) is True
+    other = RuntimeError("Coq: The reference lia was not found in the current environment.")
+    assert ScalableDocqRunner._is_retryable_transport_error(other) is False
+
+
+def test_runner_detects_context_window_limit_error() -> None:
+    exc = RuntimeError(
+        "status_code: 400, model_name: moonshotai/kimi-k2.5, body: {'message': "
+        "\"This endpoint's maximum context length is 262144 tokens. However, you requested about 292148 tokens.\"}"
+    )
+    assert ScalableDocqRunner._is_compression_limit_error(exc) is True
+    other = RuntimeError("Coq: The reference lia was not found in the current environment.")
+    assert ScalableDocqRunner._is_compression_limit_error(other) is False
+
+
+def test_clip_goal_text_truncates_long_goals() -> None:
+    long_goal = "G" * 20050
+    clipped = _clip_goal_text(long_goal, max_chars=1000)
+    assert clipped.startswith("G" * 1000)
+    assert "goal truncated" in clipped
+    assert "omitted" in clipped
+    assert len(clipped) < len(long_goal)
+
+
 def test_runner_resume_prompt_after_output_validation_includes_recovery_steps():
     text = ScalableDocqRunner._resume_prompt_after_output_validation(
         main_prompt="Solve theorem.",
@@ -380,19 +503,28 @@ def test_semantic_doc_search_client_sends_env_and_sorts_top_k(monkeypatch: pytes
                         "score": 0.2,
                         "logical_path": "A.B",
                         "relative_path": "a/b.v",
-                        "localization": {"start_line": 10},
+                        "line": 10,
+                        "character": 2,
+                        "statement": "Lemma foo : True.",
+                        "localization": {"start_line": 10, "start_character": 2},
                     },
                     {
                         "score": 0.9,
                         "logical_path": "C.D",
                         "relative_path": "c/d.v",
-                        "localization": {"start_line": 3},
+                        "line": 3,
+                        "character": 14,
+                        "statement": "Theorem bar : True.",
+                        "localization": {"start_line": 3, "start_character": 14},
                     },
                     {
                         "score": "0.5",
                         "logical_path": "E.F",
                         "relative_path": "e/f.v",
-                        "localization": {"start_line": 7},
+                        "line": "7",
+                        "character": "1",
+                        "statement": "Fact baz : True.",
+                        "localization": {"start_line": 7, "start_character": 1},
                     },
                 ]
             }
@@ -424,7 +556,44 @@ def test_semantic_doc_search_client_sends_env_and_sorts_top_k(monkeypatch: pytes
     assert out[1]["score"] == 0.5
     assert out[0]["logical_path"] == "C.D"
     assert out[0]["relative_path"] == "c/d.v"
-    assert out[0]["localization"]["start_line"] == 3
+    assert out[0]["statement"] == "Theorem bar : True."
+    assert out[0]["line"] == 3
+    assert out[0]["character"] == 14
+    assert out[0]["localization"]["line"] == 3
+    assert out[0]["localization"]["character"] == 14
+
+
+def test_semantic_doc_search_client_falls_back_to_localization_line_character(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "results": [
+                    {
+                        "score": 0.7,
+                        "logical_path": "X.Y",
+                        "relative_path": "x/y.v",
+                        "statement": "Lemma local : True.",
+                        "localization": {"start_line": 42, "start_character": 9},
+                    }
+                ]
+            }
+
+    def _fake_post(url: str, *, json: dict[str, Any], headers: dict[str, Any], timeout: float):
+        return _Resp()
+
+    monkeypatch.setattr("agent.docstring_tools.requests.post", _fake_post)
+    client = SemanticDocSearchClient(base_url="http://127.0.0.1:8010")
+    out = client.search("some query", k=1)
+    assert len(out) == 1
+    assert out[0]["line"] == 42
+    assert out[0]["character"] == 9
+    assert out[0]["localization"]["line"] == 42
+    assert out[0]["localization"]["character"] == 9
 
 
 def test_runner_attempt_limits_preserve_explicit_total_limit(tmp_path: Path):
@@ -510,6 +679,57 @@ def test_document_manager_state_branching(tmp_path: Path):
     assert verbose[1]["parent_state_index"] == 0
     assert verbose[2]["parent_state_index"] == 0
     assert verbose[3]["parent_state_index"] == 1
+
+
+def test_document_manager_run_tac_latest_uses_latest_state(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+
+    out1 = manager.run_tac_latest(tactic="idtac.")
+    out2 = manager.run_tac_latest(tactic="idtac.")
+
+    assert out1["ok"] is True
+    assert out2["ok"] is True
+    assert out1["source_state_index"] == 0
+    assert out2["source_state_index"] == 1
+    assert out2["new_state_index"] == 2
+
+
+def test_document_manager_run_tac_rejects_empty_tactic(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+
+    out = manager.run_tac(state_index=0, tactic="")
+
+    assert out["ok"] is False
+    assert "empty tactic" in out["error"]
+
+
+def test_document_manager_run_tac_rejects_proof_command(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+
+    out = manager.run_tac(state_index=0, tactic="Proof.")
+
+    assert out["ok"] is False
+    assert "top-level vernac commands" in out["error"]
+
+
+def test_document_manager_current_head_and_stale_state_warning(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+
+    first = manager.run_tac(state_index=0, tactic="idtac.")
+    assert first["ok"] is True
+    stale = manager.run_tac(state_index=0, tactic="idtac.")
+    assert stale["ok"] is True
+    assert stale["stale_state"] is True
+    assert "non-latest state" in str(stale.get("stale_state_warning", ""))
+
+    head = manager.current_head()
+    assert head["doc_id"] == manager.head_doc_id
+    assert isinstance(head["latest_state_index"], int)
+    assert head["recommended_next_action"] in {"run_tac_latest", "finish_candidate"}
 
 
 def test_document_manager_auto_branch_on_mutation_from_older_doc(tmp_path: Path):
@@ -648,6 +868,27 @@ def test_document_manager_add_import_accepts_full_statement_in_source(tmp_path: 
     assert out["ok"] is True
     workspace = manager.show_workspace()
     assert "From mathcomp.fingroup Require Import perm." in workspace["content"]
+
+
+def test_document_manager_add_import_accepts_require_import_statement(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    out = manager.add_import(
+        libname="ignored",
+        source="Require Import Coq.Logic.FunctionalExtensionality.",
+    )
+    assert out["ok"] is True
+    workspace = manager.show_workspace()
+    assert "From Coq.Logic Require Import FunctionalExtensionality." in workspace["content"]
+
+
+def test_normalize_import_parts_accepts_require_import_statement():
+    lib, src = _normalize_import_parts(
+        "ignored",
+        "Require Import Coq.Logic.FunctionalExtensionality.",
+    )
+    assert lib == "Coq.Logic"
+    assert src == "FunctionalExtensionality"
 
 
 def test_document_manager_add_import_rejects_invalid_import_via_probe(tmp_path: Path):
@@ -815,6 +1056,34 @@ def test_document_manager_mutation_validator_rejects_and_rolls_back(tmp_path: Pa
     assert sorted(manager.sessions.keys()) == [0]
 
 
+def test_validate_subagent_abort_explanation_rejects_short_message() -> None:
+    ok, error = _validate_subagent_abort_explanation("not provable")
+    assert ok is False
+    assert "Abort rejected" in error
+    assert str(ABORT_MIN_CHARS) in error
+    assert str(ABORT_MIN_WORDS) in error
+
+
+def test_validate_subagent_abort_explanation_accepts_detailed_message() -> None:
+    detailed = (
+        "Context: We are proving a helper lemma with one remaining goal and no direct matching hypotheses.\n"
+        "Attempt 1: Tried structured induction on n with simplification and rewriting, but the induction "
+        "hypothesis does not match the transformed target shape.\n"
+        "Attempt 2: Tried introducing an intermediate equality and searching imports with explore_toc and "
+        "semantic_doc_search, then applied several candidate lemmas; each candidate failed due to side conditions "
+        "that cannot be discharged from available assumptions.\n"
+        "Observed errors: Repeated tactic errors include no matching subterm for rewrite, inability to unify "
+        "goal heads after simplification, and missing algebraic preconditions despite import attempts.\n"
+        "Why unlikely solvable now: Two materially different proof strategies failed with concrete blockers, "
+        "and the remaining path appears to require a stronger lemma not present in the current local context.\n"
+        "Suggested next steps: Main agent should either reformulate the lemma statement with stronger premises, "
+        "or first prove a prerequisite algebraic helper lemma and retry from the latest state after replay."
+    )
+    ok, error = _validate_subagent_abort_explanation(detailed)
+    assert ok is True
+    assert error == ""
+
+
 def test_docq_add_intermediate_lemma_success_and_abort(tmp_path: Path):
     client = FakeClient()
     session = DocqAgentSession.from_source(
@@ -892,6 +1161,95 @@ def test_docq_prepare_prove_drop_intermediate_lemma(tmp_path: Path):
     assert failed["pending"] is True
     dropped = session.drop_pending_intermediate_lemma(lemma_name="helper_bad")
     assert dropped["ok"] is True
+
+
+def test_docq_prove_intermediate_manual_mode_when_no_subagent_model(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    prep = session.prepare_intermediate_lemma(lemma_type="True", lemma_name="helper_manual")
+    assert prep["ok"] is True
+
+    blocked = session.prove_intermediate_lemma(lemma_name="helper_manual")
+    assert blocked["ok"] is False
+    assert blocked["manual_mode_required"] is True
+    assert blocked["pending"] is True
+
+    head0 = session.pending_lemma_current_head(lemma_name="helper_manual")
+    assert head0["ok"] is True
+    assert head0["latest_goals_count"] == 1
+
+    step1 = session.pending_lemma_run_tac(lemma_name="helper_manual", tactic="idtac.")
+    assert step1["ok"] is True
+    step2 = session.pending_lemma_run_tac(lemma_name="helper_manual", tactic="idtac.")
+    assert step2["ok"] is True
+
+    head1 = session.pending_lemma_current_head(lemma_name="helper_manual")
+    assert head1["ok"] is True
+    assert head1["latest_goals_count"] == 0
+
+    proved = session.prove_intermediate_lemma(lemma_name="helper_manual")
+    assert proved["ok"] is True
+    assert proved["lemma_name"] == "helper_manual"
+    assert session.list_pending_intermediate_lemmas() == []
+
+
+def test_docq_add_intermediate_lemma_manual_handoff_when_no_subagent_model(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    out = session.add_intermediate_lemma(lemma_type="True", lemma_name="helper_manual_add")
+    assert out["ok"] is True
+    assert out["phase"] == "prepare_pending_manual"
+    assert out["manual_mode_required"] is True
+    assert out["pending"] is True
+    assert out["next_action"] == "pending_lemma_run_tac"
+    assert out["lemma_name"] == "helper_manual_add"
+    assert any(x["lemma_name"] == "helper_manual_add" for x in session.list_pending_intermediate_lemmas())
+
+    step1 = session.pending_lemma_run_tac(lemma_name="helper_manual_add", tactic="idtac.")
+    assert step1["ok"] is True
+    step2 = session.pending_lemma_run_tac(lemma_name="helper_manual_add", tactic="idtac.")
+    assert step2["ok"] is True
+
+    proved = session.prove_intermediate_lemma(lemma_name="helper_manual_add")
+    assert proved["ok"] is True
+    assert proved["lemma_name"] == "helper_manual_add"
+
+
+def test_pending_lemma_run_tac_invalid_state_returns_error_payload(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    prep = session.prepare_intermediate_lemma(lemma_type="True", lemma_name="helper_invalid_state")
+    assert prep["ok"] is True
+
+    out = session.pending_lemma_run_tac(
+        lemma_name="helper_invalid_state",
+        tactic="idtac.",
+        state_index=999,
+    )
+    assert out["ok"] is False
+    assert out["lemma_name"] == "helper_invalid_state"
+    assert out["requested_state_index"] == 999
+    assert "available_state_indexes" in out
+    assert "Unknown state index" in out["error"]
+    assert "pending_lemma_current_head" in out["hint"]
 
 
 def test_docq_prepare_intermediate_records_subagent_message(tmp_path: Path):
@@ -1075,6 +1433,18 @@ def test_document_manager_materialized_source_uses_current_proof_trace(tmp_path:
     assert materialized.count("idtac.") == 2
 
 
+def test_document_manager_materialized_source_does_not_fake_qed_when_open(tmp_path: Path):
+    client = FakeClient()
+    manager = DocumentManager(client, _source_file(tmp_path), timeout=5.0)
+    manager.run_tac(state_index=0, tactic="idtac.")
+    materialized = manager.materialized_source()
+    assert "Proof." in materialized
+    assert "proof unfinished" in materialized
+    assert "Admitted." not in materialized
+    tail = [line for line in materialized.splitlines() if line.strip()][-1]
+    assert "no final Qed" in tail
+
+
 def test_docq_request_budget_blocks_subagent(tmp_path: Path):
     client = FakeClient()
     session = DocqAgentSession.from_source(
@@ -1135,7 +1505,48 @@ def test_docq_output_validator_blocks_when_head_proof_not_finished(tmp_path: Pat
         agent.run_sync("Stop now.", deps=session)
 
 
-def test_docq_output_validator_runs_explicit_final_qed_check(tmp_path: Path):
+def test_docq_output_validator_does_not_bypass_json_when_head_not_finished(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    agent = build_docq_agent(
+        model=TestModel(call_tools=[], custom_output_text='{"ok": true}'),
+        retries=1,
+    )
+    with pytest.raises(Exception, match="output validation"):
+        agent.run_sync("Stop now.", deps=session)
+
+
+def test_docq_output_validator_runs_explicit_final_qed_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _FakePassReport:
+        def to_json(self) -> dict[str, Any]:
+            return {
+                "ok": True,
+                "summary": {
+                    "num_obligations": 1,
+                    "passed": 1,
+                    "failed": 0,
+                    "global_failures": 0,
+                },
+                "global_failures": [],
+                "outcomes": [],
+            }
+
+    def _fake_run_safeverify(*args: Any, **kwargs: Any) -> _FakePassReport:
+        return _FakePassReport()
+
+    import src.rocq_ml_toolbox.safeverify.core as sv_core
+
+    monkeypatch.setattr(sv_core, "run_safeverify", _fake_run_safeverify)
+
     client = FakeClient()
     session = DocqAgentSession.from_source(
         client,
@@ -1177,6 +1588,55 @@ def test_docq_output_validator_blocks_when_explicit_final_qed_fails(tmp_path: Pa
     assert client.qed_attempted is True
 
 
+def test_docq_output_validator_blocks_when_safeverify_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _FakeReport:
+        def to_json(self) -> dict[str, Any]:
+            return {
+                "ok": False,
+                "summary": {
+                    "num_obligations": 1,
+                    "passed": 0,
+                    "failed": 1,
+                    "global_failures": 0,
+                },
+                "global_failures": [],
+                "outcomes": [
+                    {
+                        "ok": False,
+                        "obligation": {"name": "target"},
+                        "failure_codes": ["disallowed_axioms"],
+                    }
+                ],
+            }
+
+    def _fake_run_safeverify(*args: Any, **kwargs: Any) -> _FakeReport:
+        return _FakeReport()
+
+    import src.rocq_ml_toolbox.safeverify.core as sv_core
+
+    monkeypatch.setattr(sv_core, "run_safeverify", _fake_run_safeverify)
+
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    session.doc_manager.run_tac(state_index=0, tactic="idtac.")
+    session.doc_manager.run_tac(state_index=1, tactic="idtac.")
+    agent = build_docq_agent(
+        model=TestModel(call_tools=[], custom_output_text="I am done."),
+        retries=1,
+    )
+    with pytest.raises(Exception, match="output validation"):
+        agent.run_sync("Stop now.", deps=session)
+
+
 def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
     client = FakeDenyTmpReadClient()
     session = DocqAgentSession.from_source(
@@ -1207,10 +1667,11 @@ def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
                 "explore_toc",
                 "semantic_doc_search",
                 "read_source_file",
-                "show_workspace",
                 "read_workspace_source",
+                "current_head",
                 "list_states",
                 "get_goals",
+                "run_tac_latest",
                 "run_tac",
                 "require_import",
                 "abort",
@@ -1229,14 +1690,13 @@ def test_docq_subagent_has_exploration_and_retrieval_tools(tmp_path: Path):
     assert payload["read_source_file"]["ok"] is False
     assert payload["read_source_file"]["source_kind"] == "workspace_doc"
     assert "read_workspace_source" in payload["read_source_file"]["hint"]
-    assert "show_workspace" in payload
-    assert "states" in payload["show_workspace"]
-    assert "source_path" not in payload["show_workspace"]
     assert "read_workspace_source" in payload
     assert payload["read_workspace_source"]["doc_id"] == branch.doc_id
     assert "source_path" not in payload["read_workspace_source"]
+    assert "current_head" in payload
     assert "list_states" in payload
     assert "get_goals" in payload
+    assert "run_tac_latest" in payload
     assert "run_tac" in payload
     assert "require_import" in payload
     assert "abort" in payload
@@ -1257,15 +1717,126 @@ def test_docq_subagent_require_import_applies_to_workspace_and_replays(tmp_path:
         client=session.client,
         toc_explorer=session.toc_explorer,
     )
-    agent = build_docq_subagent(model=TestModel(call_tools=["run_tac", "require_import", "show_workspace"]))
-    result = agent.run_sync("Run tactic then require import and show workspace.", deps=deps)
+    agent = build_docq_subagent(model=TestModel(call_tools=["run_tac", "require_import", "read_workspace_source"]))
+    result = agent.run_sync("Run tactic then require import and read workspace source.", deps=deps)
     payload = json.loads(result.output)
 
     assert payload["run_tac"]["ok"] is True
     assert payload["require_import"]["ok"] is True
     assert payload["require_import"]["applied_to_workspace"] is True
-    assert "From Stdlib Require Import List." in payload["show_workspace"]["content"]
-    assert len(payload["show_workspace"]["states"]) >= 2
+    assert "From Stdlib Require Import List." in payload["read_workspace_source"]["content"]
+
+
+def test_docq_subagent_run_tac_rejected_after_proof_is_finished(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    branch = session.doc_manager.sessions[session.doc_manager.head_doc_id]
+    # Reach a solved latest state first.
+    assert branch.run_tac(0, "idtac.")["ok"] is True
+    assert branch.run_tac(1, "idtac.")["ok"] is True
+    deps = LemmaSubSession(
+        branch=branch,
+        client=session.client,
+        toc_explorer=session.toc_explorer,
+    )
+    agent = build_docq_subagent(model=TestModel(call_tools=["run_tac"]))
+    result = agent.run_sync("Try an extra tactic after completion.", deps=deps)
+    payload = json.loads(result.output)
+    assert payload["run_tac"]["ok"] is False
+    assert "already finished" in payload["run_tac"]["error"]
+    assert "run_tac_latest" in payload["run_tac"]["error"]
+    assert "current_head" in payload["run_tac"]["hint"]
+    assert "abort" in payload["run_tac"]["hint"]
+
+
+def test_docq_subagent_run_tac_latest_rejected_after_proof_is_finished(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    branch = session.doc_manager.sessions[session.doc_manager.head_doc_id]
+    assert branch.run_tac(0, "idtac.")["ok"] is True
+    assert branch.run_tac(1, "idtac.")["ok"] is True
+    deps = LemmaSubSession(
+        branch=branch,
+        client=session.client,
+        toc_explorer=session.toc_explorer,
+    )
+    agent = build_docq_subagent(model=TestModel(call_tools=["run_tac_latest"]))
+    result = agent.run_sync("Try run_tac_latest after completion.", deps=deps)
+    payload = json.loads(result.output)
+    assert payload["run_tac_latest"]["ok"] is False
+    assert "already finished" in payload["run_tac_latest"]["error"]
+    assert "run_tac" in payload["run_tac_latest"]["error"]
+    assert "current_head" in payload["run_tac_latest"]["hint"]
+    assert "abort" in payload["run_tac_latest"]["hint"]
+
+
+def test_docq_subagent_abort_rejected_when_proof_already_finished(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    branch = session.doc_manager.sessions[session.doc_manager.head_doc_id]
+    assert branch.run_tac(0, "idtac.")["ok"] is True
+    assert branch.run_tac(1, "idtac.")["ok"] is True
+    deps = LemmaSubSession(
+        branch=branch,
+        client=session.client,
+        toc_explorer=session.toc_explorer,
+    )
+    agent = build_docq_subagent(model=TestModel(call_tools=["abort"]))
+    result = agent.run_sync("Abort after completion.", deps=deps)
+    payload = json.loads(result.output)
+    assert payload["abort"].startswith("ABORT_REJECTED:")
+    assert "already finished" in payload["abort"]
+    assert "return final answer" in payload["abort"]
+
+
+def test_docq_subagent_zero_goals_without_proof_finished_is_not_finished(tmp_path: Path):
+    client = FakeZeroGoalsNotFinishedClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+    )
+    branch = session.doc_manager.sessions[session.doc_manager.head_doc_id]
+    assert branch.run_tac(0, "idtac.")["ok"] is True
+    assert branch.run_tac(1, "idtac.")["ok"] is True
+    latest = branch.latest_state_index
+    latest_status = branch.get_goals(latest)
+    assert len(latest_status["goals"]) == 0
+    assert latest_status["proof_finished"] is False
+
+    deps = LemmaSubSession(
+        branch=branch,
+        client=session.client,
+        toc_explorer=session.toc_explorer,
+    )
+    agent = build_docq_subagent(model=TestModel(call_tools=["current_head", "run_tac_latest"]))
+    result = agent.run_sync("Check finish behavior when no focused goals but proof is not finished.", deps=deps)
+    payload = json.loads(result.output)
+
+    assert payload["current_head"]["latest_goals_count"] == 0
+    assert payload["current_head"]["latest_proof_finished"] is False
+    assert payload["current_head"]["recommended_next_action"] == "resolve_unfocused_obligations"
+    assert payload["run_tac_latest"]["ok"] is True
 
 
 def test_docq_subagent_read_source_file_rejects_workspace_path(tmp_path: Path):
@@ -1298,6 +1869,48 @@ def test_docq_subagent_can_disable_semantic_tool():
     assert "semantic_doc_search" not in names
     assert "explore_toc" in names
     assert "run_tac" in names
+
+
+def test_docq_subagent_exposes_nested_intermediate_lemma_tools():
+    agent = build_docq_subagent(model=TestModel())
+    names = _tool_names(agent)
+    assert "prepare_intermediate_lemma" in names
+    assert "prove_intermediate_lemma" in names
+    assert "drop_pending_intermediate_lemma" in names
+    assert "list_pending_intermediate_lemmas" in names
+    assert "pending_lemma_current_head" in names
+    assert "pending_lemma_list_states" in names
+    assert "pending_lemma_get_goals" in names
+    assert "pending_lemma_run_tac" in names
+
+
+def test_docq_subagent_can_prepare_and_register_nested_intermediate_lemma(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=40,
+    )
+    branch = session.doc_manager.sessions[session.doc_manager.head_doc_id]
+    sub_branch = _create_nested_lemma_subsession(
+        base_branch=branch,
+        lemma_name="sublemma_1",
+        lemma_type="True",
+    )
+    assert sub_branch.run_tac(0, "idtac.")["ok"] is True
+    assert sub_branch.run_tac(1, "idtac.")["ok"] is True
+
+    rebuilt = _register_nested_lemma_into_branch(
+        base_branch=branch,
+        lemma_name="sublemma_1",
+        lemma_type="True",
+        proof_script=sub_branch.proof_script(sub_branch.latest_state_index),
+        required_imports=[],
+    )
+    _adopt_branch_state(branch, rebuilt)
+    assert "Lemma sublemma_1 : True." in branch.source_content
 
 
 def test_docq_subagent_start_log_includes_token_budgets(tmp_path: Path):
@@ -1344,7 +1957,7 @@ def test_docq_subagent_trace_messages_are_emitted(tmp_path: Path):
         connect=False,
         max_tool_calls=20,
         max_requests=20,
-        subagent_model=TestModel(call_tools=["show_workspace"]),
+        subagent_model=TestModel(call_tools=["read_workspace_source"]),
         trace_message_callback=lambda source, message: traced.append((source, message)),
     )
     branch = session.doc_manager.sessions[session.doc_manager.head_doc_id]
@@ -1363,7 +1976,7 @@ def test_docq_subagent_trace_requests_are_emitted(tmp_path: Path):
         connect=False,
         max_tool_calls=20,
         max_requests=20,
-        subagent_model=TestModel(call_tools=["show_workspace"]),
+        subagent_model=TestModel(call_tools=["read_workspace_source"]),
         trace_request_callback=lambda source, payload: traced_requests.append((source, payload)),
     )
     branch = session.doc_manager.sessions[session.doc_manager.head_doc_id]
@@ -1381,6 +1994,75 @@ def test_docq_subagent_trace_requests_are_emitted(tmp_path: Path):
     assert "req_output_tokens" in payload
 
 
+def test_run_lemma_subagent_persists_progress_when_unfinished(tmp_path: Path):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+        max_requests=20,
+        subagent_model=TestModel(call_tools=["run_tac"]),
+    )
+    branch = session.doc_manager.sessions[session.doc_manager.head_doc_id]
+    assert branch.latest_state_index == 0
+
+    result = session.run_lemma_subagent(sub_branch=branch, prompt="Take one proof step.")
+
+    assert result["ok"] is False
+    assert "did not finish" in result["error"]
+    assert branch.latest_state_index >= 1
+
+
+def test_run_lemma_subagent_recovers_unprocessed_tool_calls_history_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        _source_file(tmp_path),
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+        max_requests=20,
+        subagent_model=TestModel(),
+    )
+    branch = session.doc_manager.sessions[session.doc_manager.head_doc_id]
+    seen_histories: list[Any] = []
+
+    class _FakeSubagent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run_sync(self, *args: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            seen_histories.append(kwargs.get("message_history"))
+            if self.calls == 1:
+                raise RuntimeError(
+                    "Cannot provide a new user prompt when the message history contains unprocessed tool calls."
+                )
+            deps = kwargs["deps"]
+            deps.branch.run_tac(deps.branch.latest_state_index, "idtac.")
+            deps.branch.run_tac(deps.branch.latest_state_index, "idtac.")
+
+            class _Result:
+                output = "ok"
+
+            return _Result()
+
+    fake = _FakeSubagent()
+    monkeypatch.setattr("agent.docq_agent.build_docq_subagent", lambda **kwargs: fake)
+
+    result = session.run_lemma_subagent(sub_branch=branch, prompt="Try proving.")
+
+    assert result["ok"] is True
+    assert fake.calls == 2
+    assert seen_histories[0] is None
+    assert seen_histories[1] is None
+
+
 def test_docq_agent_has_branch_and_pending_tools(tmp_path: Path):
     client = FakeClient()
     session = DocqAgentSession.from_source(
@@ -1390,33 +2072,305 @@ def test_docq_agent_has_branch_and_pending_tools(tmp_path: Path):
         connect=False,
         max_tool_calls=20,
     )
+    # Pre-solve the head proof so final output validation can pass after tool calls.
+    session.doc_manager.run_tac(state_index=0, tactic="idtac.")
+    session.doc_manager.run_tac(state_index=1, tactic="idtac.")
+    # This test focuses on tool exposure/shape, not end-to-end proof validity.
+    session.validate_final_qed = lambda *, doc_id=None, state_index=None: (True, None)  # type: ignore[assignment]
     agent = build_docq_agent(
         model=TestModel(
             call_tools=[
                 "list_docs",
-                "show_workspace",
                 "completion_status",
+                "current_head",
                 "checkout_doc",
                 "list_states",
                 "get_goals",
+                "run_tac_latest",
                 "run_tac",
                 "add_import",
                 "remove_import",
-                "prepare_intermediate_lemma",
                 "list_pending_intermediate_lemmas",
-                "drop_pending_intermediate_lemma",
             ]
         )
     )
     result = agent.run_sync("Use branch and pending tools.", deps=session)
     payload = json.loads(result.output)
     assert "list_docs" in payload
-    assert "show_workspace" in payload
     assert "completion_status" in payload
+    assert "current_head" in payload
     assert "checkout_doc" in payload
-    assert "prepare_intermediate_lemma" in payload
     assert "list_pending_intermediate_lemmas" in payload
-    assert "drop_pending_intermediate_lemma" in payload
+    assert "run_tac_latest" in payload
+    names = _tool_names(agent)
+    assert "prepare_intermediate_lemma" in names
+    assert "drop_pending_intermediate_lemma" in names
+    assert "pending_lemma_current_head" in names
+    assert "pending_lemma_get_goals" in names
+    assert "pending_lemma_run_tac" in names
+
+
+def test_runner_passes_event_stream_handler_even_without_artifacts(tmp_path: Path):
+    source = _source_file(tmp_path)
+
+    class _DummyAgent:
+        def __init__(self) -> None:
+            self.last_event_stream_handler = None
+
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            self.last_event_stream_handler = kwargs.get("event_stream_handler")
+
+            class _Result:
+                output = "ok"
+
+            return _Result()
+
+    dummy_agent = _DummyAgent()
+    runner = ScalableDocqRunner(
+        client_factory=FakeClient,
+        agent=dummy_agent,
+        env="coq-demo",
+        timeout=5.0,
+        max_tool_calls=20,
+        max_requests=20,
+        artifacts_dir=None,
+        threshold_compression=1234,
+    )
+    outputs = runner.run_many_sync([DocqAgentTask(name="t", prompt="p", source=source)])
+    assert outputs == ["ok"]
+    assert dummy_agent.last_event_stream_handler is not None
+
+
+def test_runner_request_io_compacts_payload_and_tracks_deltas(tmp_path: Path):
+    source = _source_file(tmp_path)
+    artifacts = tmp_path / "artifacts"
+
+    class _UsageNow:
+        def __init__(self, *, requests: int, input_tokens: int, output_tokens: int):
+            self.requests = requests
+            self.input_tokens = input_tokens
+            self.output_tokens = output_tokens
+
+    async def _empty_stream():
+        if False:
+            yield None
+
+    class _TracingAgent:
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            handler = kwargs.get("event_stream_handler")
+            assert handler is not None
+
+            class _RunCtx:
+                pass
+
+            run_ctx = _RunCtx()
+            run_ctx.run_step = 1
+            run_ctx.usage = _UsageNow(requests=1, input_tokens=100, output_tokens=10)
+            run_ctx.messages = [
+                _FakeMessage(None),
+                _FakeMessage(_FakeMsgUsage(input_tokens=100, output_tokens=10, total_tokens=110)),
+            ]
+            await handler(run_ctx, _empty_stream())
+
+            run_ctx.run_step = 2
+            run_ctx.usage = _UsageNow(requests=2, input_tokens=230, output_tokens=22)
+            run_ctx.messages.extend(
+                [
+                    _FakeMessage(None),
+                    _FakeMessage(_FakeMsgUsage(input_tokens=130, output_tokens=12, total_tokens=142)),
+                ]
+            )
+            await handler(run_ctx, _empty_stream())
+
+            class _Result:
+                output = "ok"
+
+            return _Result()
+
+    runner = ScalableDocqRunner(
+        client_factory=FakeClient,
+        agent=_TracingAgent(),
+        env="coq-demo",
+        timeout=5.0,
+        max_tool_calls=20,
+        max_requests=20,
+        artifacts_dir=artifacts,
+        threshold_compression=999999,
+    )
+    outputs = runner.run_many_sync([DocqAgentTask(name="t", prompt="p", source=source)])
+    assert outputs == ["ok"]
+
+    task_dir = sorted(artifacts.iterdir())[0]
+    request_lines = [
+        json.loads(line)
+        for line in (task_dir / "request_io.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(request_lines) == 2
+    first = request_lines[0]["payload"]
+    second = request_lines[1]["payload"]
+    assert "context_messages" not in first
+    assert "request_message" not in first
+    assert "response_message" not in first
+    assert first["context_delta"]["new_count"] == 1
+    assert second["context_delta"]["new_count"] == 2
+    assert second["delta"]["requests"] == 1
+    assert second["delta"]["response_index"] == 2
+    assert "omitted" in second
+    assert "request_message" in second["omitted"]
+    assert "response_message" in second["omitted"]
+
+
+def test_runner_checkpoints_pending_lemma_subdocs(tmp_path: Path):
+    source = _source_file(tmp_path)
+    artifacts = tmp_path / "artifacts"
+
+    class _PendingLemmaAgent:
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            session = kwargs["deps"]
+            prepared = session.prepare_intermediate_lemma(
+                lemma_name="helper_pending",
+                lemma_type="True",
+            )
+            assert prepared.get("ok") is True
+
+            class _Result:
+                output = "ok-pending"
+
+            return _Result()
+
+    runner = ScalableDocqRunner(
+        client_factory=FakeClient,
+        agent=_PendingLemmaAgent(),
+        env="coq-demo",
+        timeout=5.0,
+        max_tool_calls=20,
+        max_requests=20,
+        artifacts_dir=artifacts,
+    )
+    outputs = runner.run_many_sync([DocqAgentTask(name="t", prompt="p", source=source)])
+    assert outputs == ["ok-pending"]
+
+    task_dir = sorted(artifacts.iterdir())[0]
+    summary = json.loads((task_dir / "summary.json").read_text(encoding="utf-8"))
+    pending = summary["pending_lemmas"]
+    assert pending
+    assert pending[0]["lemma_name"] == "helper_pending"
+    sub_doc_id = int(pending[0]["sub_doc_id"])
+
+    pending_doc_meta = next(doc for doc in summary["docs"] if int(doc["doc_id"]) == sub_doc_id)
+    assert pending_doc_meta.get("is_pending_lemma") is True
+    assert (task_dir / pending_doc_meta["content_file"]).exists()
+    assert (task_dir / "docs" / f"doc_{sub_doc_id}_materialized.v").exists()
+
+    checkpoint_lines = [
+        json.loads(line)
+        for line in (task_dir / "doc_checkpoints.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert checkpoint_lines
+    changed_docs = checkpoint_lines[-1]["changed_docs"]
+    assert any(
+        int(item.get("doc_id", -1)) == sub_doc_id and bool(item.get("is_pending_lemma", False))
+        for item in changed_docs
+    )
+    checkpoint_rel = checkpoint_lines[-1]["checkpoint_dir"]
+    assert checkpoint_rel is not None
+    checkpoint_dir = task_dir / checkpoint_rel
+    assert (checkpoint_dir / f"doc_{sub_doc_id}.v").exists()
+    assert (checkpoint_dir / f"doc_{sub_doc_id}_materialized.v").exists()
+
+
+def test_runner_retries_transient_transport_failure(tmp_path: Path):
+    source = _source_file(tmp_path)
+
+    class _RetryOnceAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("Exception: Response payload is not completed")
+
+            class _Result:
+                output = "ok-after-retry"
+
+            return _Result()
+
+    retry_agent = _RetryOnceAgent()
+    runner = ScalableDocqRunner(
+        client_factory=FakeClient,
+        agent=retry_agent,
+        env="coq-demo",
+        timeout=5.0,
+        max_tool_calls=20,
+        max_requests=20,
+        artifacts_dir=None,
+        max_transport_retries=2,
+    )
+    outputs = runner.run_many_sync([DocqAgentTask(name="t", prompt="p", source=source)])
+    assert outputs == ["ok-after-retry"]
+    assert retry_agent.calls == 2
+
+
+def test_runner_compression_snapshot_uses_true_goals_count(tmp_path: Path):
+    source = _source_file(tmp_path)
+    client = FakeClient()
+    session = DocqAgentSession.from_source(
+        client,
+        source,
+        env="coq-demo",
+        connect=False,
+        max_tool_calls=20,
+        max_requests=20,
+    )
+
+    class _FakeCompressor:
+        def __init__(self) -> None:
+            self.prompt = ""
+
+        async def run(self, prompt: str, **kwargs: Any) -> Any:
+            self.prompt = prompt
+
+            class _Result:
+                output = "summary"
+
+            return _Result()
+
+    fake = _FakeCompressor()
+    runner = ScalableDocqRunner(
+        client_factory=FakeClient,
+        agent=build_docq_agent(model=TestModel()),
+        env="coq-demo",
+        timeout=5.0,
+        max_tool_calls=20,
+        max_requests=20,
+    )
+    runner._compression_agent = fake  # type: ignore[assignment]
+    session.completion_status = lambda: {  # type: ignore[method-assign]
+        "doc_id": 0,
+        "head_doc_id": 0,
+        "latest_state_index": 0,
+        "latest_goals_count": 5,
+    }
+    session.doc_manager.get_goals = (  # type: ignore[method-assign]
+        lambda **kwargs: {"goals": [f"goal-{i}" for i in range(5)]}
+    )
+
+    import asyncio
+
+    out_summary, out_trace = asyncio.run(
+        runner._summarize_for_compression(
+            session=session,
+            main_prompt="prove",
+            message_history=[],
+            round_index=1,
+        )
+    )
+    assert out_summary == "summary"
+    assert out_trace is None
+    assert '"latest_goals_count": 5' in fake.prompt
 
 
 def test_docq_agent_can_disable_semantic_tool(tmp_path: Path):
@@ -1507,3 +2461,28 @@ def test_rebuild_branch_with_import_replays_existing_tactics(tmp_path: Path):
     assert info["replayed_tactics"] == 1
     assert "From MathComp Require Import ssreflect." in rebuilt.source_content
     assert rebuilt.latest_state_index == 1
+
+
+def test_rebuild_branch_with_import_rejects_invalid_import_via_probe(tmp_path: Path):
+    client = FakeImportProbeFailClient()
+    source = _source_file(tmp_path)
+    manager = DocumentManager(client, source, timeout=5.0)
+    branch = manager.sessions[manager.head_doc_id]
+    with pytest.raises(ValueError, match="Import probe rejected"):
+        _rebuild_branch_with_import(branch, libname="Bad", source="Missing")
+
+
+def test_adopt_branch_state_resets_loop_guard_memory(tmp_path: Path):
+    source = _source_file(tmp_path)
+    session = DocqAgentSession.from_source(FakeClient(), source, env="coq-demo", connect=False)
+    branch = session.doc_manager.sessions[session.doc_manager.head_doc_id]
+    rebuilt, _ = _rebuild_branch_with_import(branch, libname="Stdlib", source="List")
+    branch._last_failure_signature = (0, "same failure")
+    branch._last_failure_count = 3
+    branch._last_stagnation_signature = (0, "idtac.")
+    branch._last_stagnation_count = 8
+    _adopt_branch_state(branch, rebuilt)
+    assert branch._last_failure_signature is None
+    assert branch._last_failure_count == 0
+    assert branch._last_stagnation_signature is None
+    assert branch._last_stagnation_count == 0
