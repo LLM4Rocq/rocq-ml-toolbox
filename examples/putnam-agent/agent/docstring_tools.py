@@ -23,15 +23,51 @@ class SemanticDocSearchClient:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _to_int_or_none(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     @classmethod
     def _normalize_result(cls, item: dict[str, Any]) -> dict[str, Any]:
         score = cls._to_float_or_none(item.get("score"))
         normalized = dict(item)
         normalized["score"] = score
-        normalized["logical_path"] = item.get("logical_path")
-        normalized["relative_path"] = item.get("relative_path")
+        normalized["logical_path"] = item.get("logical_path") or item.get("source_logical_path")
+        normalized["relative_path"] = item.get("relative_path") or item.get("physical_path")
+
         localization = item.get("localization")
-        normalized["localization"] = localization if isinstance(localization, dict) else {}
+        loc: dict[str, Any] = dict(localization) if isinstance(localization, dict) else {}
+
+        line = cls._to_int_or_none(item.get("line"))
+        if line is None:
+            line = cls._to_int_or_none(loc.get("line"))
+        if line is None:
+            line = cls._to_int_or_none(loc.get("start_line"))
+
+        character = cls._to_int_or_none(item.get("character"))
+        if character is None:
+            character = cls._to_int_or_none(loc.get("character"))
+        if character is None:
+            character = cls._to_int_or_none(loc.get("start_character"))
+        if character is None:
+            character = cls._to_int_or_none(loc.get("column"))
+        if character is None:
+            character = cls._to_int_or_none(loc.get("start_column"))
+
+        statement = item.get("statement")
+        normalized["statement"] = statement if isinstance(statement, str) else None
+        normalized["line"] = line
+        normalized["character"] = character
+        if line is not None:
+            loc["line"] = line
+        if character is not None:
+            loc["character"] = character
+        normalized["localization"] = loc
         return normalized
 
     def search(self, query: str, k: int = 10) -> list[dict[str, Any]]:
