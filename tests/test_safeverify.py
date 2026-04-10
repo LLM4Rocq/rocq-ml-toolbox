@@ -95,6 +95,23 @@ Proof. exact I. Qed.
     assert report.outcomes[0].checks["statement"] is True
 
 
+def test_pass_simple_admitted_solution_single_line_proof_admitted(tmp_path: Path):
+    source = """
+Theorem t : True.
+Proof. Admitted.
+"""
+    target = """
+Theorem t : True.
+Proof. exact I. Qed.
+"""
+    report, _, _, _ = _run_pair(tmp_path, source, target)
+
+    assert report.ok is True
+    assert report.summary()["num_obligations"] == 1
+    assert report.summary()["failed"] == 0
+    assert report.outcomes[0].checks["statement"] is True
+
+
 def test_fail_target_has_admitted(tmp_path: Path):
     source = """
 Theorem t : True.
@@ -103,6 +120,21 @@ Admitted.
     target = """
 Theorem t : True.
 Admitted.
+"""
+    report, _, _, _ = _run_pair(tmp_path, source, target)
+
+    assert report.ok is False
+    assert FailureCode.INCOMPLETE_PROOF.value in _codes(report)
+
+
+def test_fail_target_has_admitted_single_line(tmp_path: Path):
+    source = """
+Theorem t : True.
+Admitted.
+"""
+    target = """
+Theorem t : True.
+Proof. Admitted.
 """
     report, _, _, _ = _run_pair(tmp_path, source, target)
 
