@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 import json
+import re
 import shlex
 import subprocess
 import tempfile
@@ -22,6 +23,7 @@ INCOMPLETE_PROOF_SNIPPETS = (
     "remaining open goals",
     "proof term is not complete",
 )
+ADMITTED_STEP_RE = re.compile(r"\b(Admitted|admit)\b")
 ERROR_SEVERITY = 1
 
 
@@ -106,7 +108,7 @@ def _proof_error_diagnostics(proof: ProofEntry, diags: Sequence[Diagnostic]) -> 
 
 
 def _proof_has_admitted_step(proof: ProofEntry) -> bool:
-    return any(_normalize_step(step.raw) == "Admitted." for step in proof.steps)
+    return any(ADMITTED_STEP_RE.search(_normalize_step(step.raw)) for step in proof.steps)
 
 
 def _proof_has_self_axiom(proof: ProofEntry) -> bool:
@@ -631,6 +633,20 @@ def run_safeverify(
                 source_start_character=proof.start_range.start.character,
             )
         )
+
+    if not obligations:
+        try:
+            source_text = source.read_text(encoding="utf-8")
+        except Exception:
+            source_text = ""
+        if ADMITTED_STEP_RE.search(source_text):
+            report.add_global_failure(
+                FailureCode.PARSE_OR_COMPILE_ERROR,
+                (
+                    "No obligations were detected in source, but admitted markers were found. "
+                    "SafeVerify cannot reliably map missing proofs for this file."
+                ),
+            )
 
     source_duplicate_names = _duplicate_names(ob.name for ob in obligations)
     target_duplicate_names = _duplicate_names(proof.name for proof in target_dump.proofs)
