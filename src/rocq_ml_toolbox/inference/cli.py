@@ -154,7 +154,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument(
         "--session-ttl-seconds",
         type=int,
-        default=int(os.environ.get("SESSION_TTL_SECONDS", str(30 * 60))),
+        default=int(os.environ.get("SESSION_TTL_SECONDS", str(10*60*60))),
         help="Session inactivity TTL in seconds before eviction.",
     )
     p.add_argument(
