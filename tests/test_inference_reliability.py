@@ -83,7 +83,7 @@ class FakeRedis:
             "blocking": blocking,
             "blocking_timeout": blocking_timeout,
         }
-        return FakeLock()
+        return FakeLock(acquire_result=(key not in self.store))
 
     def pipeline(self):
         return FakePipeline(self)
@@ -107,11 +107,12 @@ class FakePipeline:
 
 
 class FakeLock:
-    def __init__(self):
+    def __init__(self, acquire_result: bool = True):
         self.released = False
+        self.acquire_result = acquire_result
 
     def acquire(self):
-        return True
+        return self.acquire_result
 
     def release(self):
         self.released = True
@@ -353,3 +354,58 @@ def test_redis_cleanup_patterns_include_mapping_and_params_tree_keys():
 
     assert mapping_tree_key("*") in ALL_KEYS_STAR
     assert params_tree_key("*", "*") in ALL_KEYS_STAR
+
+
+def test_session_manager_get_worker_reconnects_when_cached_socket_is_closed(monkeypatch):
+    from rocq_ml_toolbox.inference import sessions
+
+    class FakeSocket:
+        def __init__(self, fileno_value: int):
+            self._fileno_value = fileno_value
+
+        def fileno(self) -> int:
+            return self._fileno_value
+
+        def getsockopt(self, level, optname) -> int:
+            del level, optname
+            return 0
+
+    class ExistingWorker:
+        def __init__(self):
+            self.socket = FakeSocket(-1)
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    created_workers: list[object] = []
+
+    class FakePytanque:
+        def __init__(self, host: str, port: int, mode):
+            del host, port, mode
+            self.socket = FakeSocket(12)
+            self.connected = False
+            created_workers.append(self)
+
+        def connect(self) -> None:
+            self.connected = True
+
+        def close(self) -> None:
+            self.socket._fileno_value = -1
+
+    fake_redis = FakeRedis()
+    fake_redis.set("generation:0", "0")
+    monkeypatch.setattr(sessions.redis.Redis, "from_url", lambda _: fake_redis)
+    monkeypatch.setattr(sessions, "Pytanque", FakePytanque)
+
+    sm = sessions.SessionManager("redis://unused", num_pet_server=1)
+    stale_worker = ExistingWorker()
+    sm.pytanques[0] = stale_worker
+    sm.worker_generations[0] = 0
+
+    worker = sm._get_worker(0)
+
+    assert stale_worker.closed is True
+    assert len(created_workers) == 1
+    assert worker is created_workers[0]
+    assert worker.connected is True

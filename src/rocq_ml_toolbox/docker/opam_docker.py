@@ -74,7 +74,7 @@ class OpamDocker(BaseDocker):
             self.exec_cmd([
                 "bash",
                 "-lc",
-                "cd ~/rocq-ml-toolbox && git pull"
+                "cd ~/rocq-ml-toolbox && git pull && git switch v0.1.1"
             ])
 
 
@@ -128,55 +128,26 @@ class OpamDocker(BaseDocker):
                 pass
             self.container = None
 
-    def wait_redis_ready(self, port=6379, timeout=10.0, interval=0.1):
-        """Wait until Redis answers PING with PONG."""
-        deadline = time.monotonic() + timeout
-        last_error = None
-
-        while time.monotonic() < deadline:
-            try:
-                out = self.exec_cmd(
-                    ["redis-cli", "-p", str(port), "ping"]
-                ).strip()
-                if out == "PONG":
-                    return
-                last_error = f"unexpected response: {out!r}"
-            except Exception as e:
-                last_error = str(e)
-
-            time.sleep(interval)
-
-        raise TimeoutError(
-            f"Redis was not ready within {timeout}s on port {port}. "
-            f"Last error: {last_error}"
-        )
-
-    def start_redis_server(self, port=6379):
-        """Launch redis-server inside the container."""
-        self.exec_cmd_async(f"bash -lc redis-server --port {port}")
-        self.wait_redis_ready(port)
-
-
-    def start_inference_server(self, port=5000, redis_port=6379, timeout=600, workers=9, num_pet_server=4, pet_server_start_port=8765, max_ram_per_pet=4096):
+    def start_inference_server(self, port=5000, redis_port=6379, timeout=600, workers=9, num_pet_server=4, pet_server_start_port=8765, hard_max_ram_per_pet=5000, soft_max_ram_per_pet=4096, session_ttl=3*60*60):
         """Launch pet-server inside the container."""
-        self.start_redis_server(redis_port)
         self.pet_port = pet_server_start_port
         opam_bin = os.path.join(self.config.opam_env_path, "bin")
         pet_server_path = os.path.join(opam_bin, "pet-server")
         conda_env_bin = f"/home/{self.config.user}/miniconda/envs/rocq-ml/bin"
         conda_root_bin = f"/home/{self.config.user}/miniconda/bin"
         rocq_ml_server_bin = f"/home/{self.config.user}/miniconda/envs/rocq-ml/bin/rocq-ml-server"
-        redis_url = f"redis://localhost:{redis_port}/0"
 
         cmd = f"""\
         set -e
         eval "$(opam env)"
         export PATH={shlex.quote(opam_bin)}:{shlex.quote(conda_env_bin)}:{shlex.quote(conda_root_bin)}:$PATH
         {shlex.quote(rocq_ml_server_bin)} -p {port} -w {workers} -t {timeout} -d \\
-          --redis-url {shlex.quote(redis_url)} \\
+          --redis-port {redis_port} \\
           --num-pet-server {num_pet_server} \\
           --pet-server-start-port {pet_server_start_port} \\
-          --max-ram-per-pet {max_ram_per_pet} \\
+          --hard-max-ram-per-pet {hard_max_ram_per_pet} \\
+          --soft-max-ram-per-pet {soft_max_ram_per_pet} \\
+          --session-ttl-seconds {session_ttl} \\
           --pet-server-cmd {shlex.quote(pet_server_path)}
         """
         self.exec_cmd(["bash", "-lc", cmd], check=False)

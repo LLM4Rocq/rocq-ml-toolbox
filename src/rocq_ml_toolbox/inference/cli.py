@@ -154,7 +154,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument(
         "--session-ttl-seconds",
         type=int,
-        default=int(os.environ.get("SESSION_TTL_SECONDS", str(30 * 60))),
+        default=int(os.environ.get("SESSION_TTL_SECONDS", str(10*60*60))),
         help="Session inactivity TTL in seconds before eviction.",
     )
     p.add_argument(
@@ -169,11 +169,38 @@ def main(argv: Optional[List[str]] = None) -> None:
         default=int(os.environ.get("SESSION_CLEANUP_INTERVAL_SECONDS", "60")),
         help="How often to scan and evict expired sessions.",
     )
+    p.add_argument(
+        "--fs-access-mode",
+        choices=["read_lib_only", "rw_anywhere"],
+        default=os.environ.get("FS_ACCESS_MODE", "read_lib_only"),
+        help="Filesystem access policy for read_file/write_file endpoints (immutable at startup).",
+    )
+    p.add_argument(
+        "--coq-lib-path",
+        default=os.environ.get("COQ_LIB_PATH"),
+        help="Optional override for Coq lib root (defaults to `coqc -where`).",
+    )
+    p.add_argument(
+        "--fs-read-allow",
+        action="append",
+        default=None,
+        help="Additional read-allowed root path (repeatable) in read_lib_only mode.",
+    )
     p.add_argument("--app", default=DEFAULT_APP)
     p.add_argument("--config", default=DEFAULT_CONFIG)
 
     args = p.parse_args(argv)
     redis_url = redis_url_from_port(args.redis_port)
+
+    if args.fs_read_allow is not None:
+        fs_read_allow_paths = list(args.fs_read_allow)
+    else:
+        env_paths_raw = os.environ.get("FS_READ_ALLOW_PATHS", "[]")
+        try:
+            parsed = json.loads(env_paths_raw)
+        except Exception:
+            parsed = []
+        fs_read_allow_paths = [str(p) for p in parsed] if isinstance(parsed, list) else []
     
     uvicorn_cmd = [
         "uvicorn",
@@ -198,6 +225,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     env["SESSION_TTL_SECONDS"] = str(max(0, int(args.session_ttl_seconds)))
     env["SESSION_CACHE_KEEP_FEEDBACK"] = "1" if args.session_cache_keep_feedback else "0"
     env["SESSION_CLEANUP_INTERVAL_SECONDS"] = str(max(1, int(args.session_cleanup_interval_seconds)))
+    env["FS_ACCESS_MODE"] = str(args.fs_access_mode)
+    if args.coq_lib_path:
+        env["COQ_LIB_PATH"] = str(args.coq_lib_path)
+    env["FS_READ_ALLOW_PATHS"] = json.dumps(fs_read_allow_paths)
     
     first_pet_port = args.pet_server_start_port
     all_required_ports = list(range(first_pet_port, first_pet_port+ args.num_pet_server))

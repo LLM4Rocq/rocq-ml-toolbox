@@ -12,26 +12,49 @@ class PytanqueExtended(Pytanque):
     def __init__(self, host: str, port: int):
         super().__init__(host=host, port=port, mode=PytanqueMode.HTTP)
 
+    def _post_json(self, endpoint: str, payload: dict[str, Any]) -> Any:
+        url = f"http://{self.host}:{self.port}/{endpoint.lstrip('/')}"
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    @staticmethod
+    def _ensure_dict(payload: Any, *, endpoint: str) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid response from {endpoint}: expected object, got {type(payload).__name__}")
+        return payload
+
     def get_dump(self, path: Union[Path, str], root: Optional[Union[Path, str]]=None, force_dump: bool=True) -> Tuple[ProofDump, List[VernacElement], List[Diagnostic]]:
-        url = f"http://{self.host}:{self.port}/get_dump"
         if root:
             root = str(root)
-        result = requests.post(url, json={"path": str(path), "root": root, "force_dump": force_dump}).json()
+        result = self._ensure_dict(
+            self._post_json("get_dump", {"path": str(path), "root": root, "force_dump": force_dump}),
+            endpoint="/get_dump",
+        )
         raw_proof = result['proof']
         raw_ast = result['ast']
         diags = result['diags']
         return ProofDump.from_json(raw_proof), parse_ast_dump(raw_ast), [Diagnostic.from_json(d) for d in diags]
     
     def get_glob(self, path: Union[Path, str], force_compile:bool=False) -> GlobFile:
-        url = f"http://{self.host}:{self.port}/get_glob"
-        result = requests.post(url, json={"path": str(path), "force_compile": force_compile})
-        glob_file = GlobFile.from_json(result.json()['value'])
+        result = self._ensure_dict(
+            self._post_json("get_glob", {"path": str(path), "force_compile": force_compile}),
+            endpoint="/get_glob",
+        )
+        if "value" not in result:
+            raise ValueError("Invalid response from /get_glob: missing `value`.")
+        glob_file = GlobFile.from_json(result['value'])
         return glob_file
     
-    def empty_file(self) -> str:
-        url = f"http://{self.host}:{self.port}/empty_file"
-        result = requests.get(url)
-        path = result.json()['path']
+    def tmp_file(self, content: Optional[str]=None, root: Optional[Union[Path, str]]=None) -> str:
+        payload = {
+            "content": content,
+            "root": None if root is None else str(root),
+        }
+        result = self._ensure_dict(self._post_json("tmp_file", payload), endpoint="/tmp_file")
+        path = result.get('path')
+        if not isinstance(path, str):
+            raise ValueError("Invalid response from /tmp_file: missing string `path`.")
         return path
 
     def safeverify(
@@ -43,7 +66,6 @@ class PytanqueExtended(Pytanque):
         save_path: Optional[Union[Path, str]] = None,
         verbose: bool = False,
     ) -> dict[str, Any]:
-        url = f"http://{self.host}:{self.port}/safeverify"
         payload = {
             "source": str(source),
             "target": str(target),
@@ -52,9 +74,101 @@ class PytanqueExtended(Pytanque):
             "save_path": None if save_path is None else str(save_path),
             "verbose": verbose,
         }
-        response = requests.post(url, json=payload)
-        response.raise_for_status()
-        return response.json()
+        result = self._ensure_dict(self._post_json("safeverify", payload), endpoint="/safeverify")
+        return result
+
+    def access_libraries(
+        self,
+        env: str | None = None,
+        *,
+        use_cache: bool = True,
+        include_theories: bool = True,
+        include_user_contrib: bool = True,
+    ) -> dict[str, Any]:
+        result = self._ensure_dict(
+            self._post_json(
+                "access_libraries",
+                {
+                    "env": env,
+                    "use_cache": use_cache,
+                    "include_theories": include_theories,
+                    "include_user_contrib": include_user_contrib,
+                },
+            ),
+            endpoint="/access_libraries",
+        )
+        if not isinstance(result.get("nodes"), list):
+            raise ValueError("Invalid response from /access_libraries: missing list `nodes`.")
+        if not isinstance(result.get("file_index"), dict):
+            raise ValueError("Invalid response from /access_libraries: missing object `file_index`.")
+        return result
+
+    def read_file(
+        self,
+        path: Union[Path, str],
+        *,
+        offset: int = 0,
+        max_chars: int = 20000,
+        path_mode: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "path": str(path),
+            "offset": offset,
+            "max_chars": max_chars,
+        }
+        if path_mode is not None:
+            payload["path_mode"] = path_mode
+        result = self._ensure_dict(
+            self._post_json("read_file", payload),
+            endpoint="/read_file",
+        )
+        content = result.get("content")
+        if not isinstance(content, str):
+            raise ValueError("Invalid response from /read_file: missing string `content`.")
+        next_offset = result.get("next_offset")
+        eof = result.get("eof")
+        if not isinstance(next_offset, int) or not isinstance(eof, bool):
+            raise ValueError("Invalid response from /read_file: missing `next_offset` or `eof`.")
+        return result
+
+    def write_file(
+        self,
+        path: Union[Path, str],
+        *,
+        content: str,
+        offset: int = 0,
+        truncate: bool = False,
+    ) -> dict[str, Any]:
+        result = self._ensure_dict(
+            self._post_json(
+                "write_file",
+                {
+                    "path": str(path),
+                    "content": content,
+                    "offset": offset,
+                    "truncate": truncate,
+                },
+            ),
+            endpoint="/write_file",
+        )
+        bytes_written = result.get("bytes_written")
+        if not isinstance(bytes_written, int):
+            raise ValueError("Invalid response from /write_file: missing integer `bytes_written`.")
+        return result
+
+    def read_docstrings(self, source: Union[Path, str]) -> list[dict[str, Any]]:
+        result = self._ensure_dict(
+            self._post_json("read_docstrings", {"source": str(source)}),
+            endpoint="/read_docstrings",
+        )
+        docstrings = result.get("docstrings")
+        if not isinstance(docstrings, list):
+            raise ValueError("Invalid response from /read_docstrings: missing list `docstrings`.")
+        validated: list[dict[str, Any]] = []
+        for item in docstrings:
+            if isinstance(item, dict):
+                validated.append(item)
+        return validated
     
     def to_json(self) -> Any:
         return {
