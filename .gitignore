@@ -6,6 +6,11 @@ __pycache__/
 # C extensions
 *.so
 
+# agent
+
+examples/putnam-agent/interactive_test
+interactive_test/
+export/
 
 # fcc
 *.proofdepsdump

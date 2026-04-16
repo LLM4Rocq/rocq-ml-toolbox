@@ -9,6 +9,11 @@ Toolbox for ML workflows with Rocq/Coq: scalable proof interaction, parser utili
 - Docker helpers: build OPAM-based images and run the inference stack in-container. See `src/rocq_ml_toolbox/docker/README.md`.
 - Rocq LSP: minimal JSON-RPC client for `coq-lsp` AST access. See `src/rocq_ml_toolbox/rocq_lsp/README.md`.
 
+## Featured Example
+
+**Putnam Agent**: an end-to-end agentic proving workflow over Putnam-bench, showing how the toolbox components can be combined in a benchmark setting.  
+See: [`examples/putnam-agent/`](examples/putnam-agent/)
+
 ## Quick Start (Local)
 1) Install package dependencies:
 
