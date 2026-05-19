@@ -17,10 +17,10 @@ rocq-ml-safeverify = "rocq_ml_toolbox.safeverify.cli:main"
 [project.optional-dependencies]
 parser = []
 safeverify = []
-server = ["fastapi", "psutil", "pyyaml", "redis", "requests", "uvicorn", "setproctitle"] # pytanque
+server = ["fastapi", "psutil", "pyyaml", "redis", "requests", "uvicorn>=0.37.0", "setproctitle"] # pytanque
 docker = ["docker", "pyyaml", "requests"]
 client = ["requests"]
-all = ["docker", "fastapi", "psutil", "pyyaml", "redis", "requests", "uvicorn", "setproctitle"]
+all = ["docker", "fastapi", "psutil", "pyyaml", "redis", "requests", "uvicorn>=0.37.0", "setproctitle"]
 
 [build-system]
 requires = ["setuptools", "wheel"]
